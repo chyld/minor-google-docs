@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"homelab-notes/internal/fsx"
 )
@@ -376,6 +377,11 @@ func (s *Store) ListNotes(ctx context.Context, uid string, p ListParams) (*NoteL
 
 	q := strings.TrimSpace(p.Q)
 	if q != "" {
+		// NUL would truncate the LIKE pattern to "%" (match everything); such a
+		// query can't match note text anyway.
+		if strings.ContainsRune(q, 0) || !utf8.ValidString(q) || len(q) > 1000 {
+			return &NoteList{Items: []NoteMeta{}}, nil
+		}
 		ids, err := s.searchIDs(ctx, uid, q)
 		if err != nil {
 			return nil, err
@@ -383,10 +389,9 @@ func (s *Store) ListNotes(ctx context.Context, uid string, p ListParams) (*NoteL
 		if len(ids) == 0 {
 			return &NoteList{Items: []NoteMeta{}}, nil
 		}
-		where = append(where, "n.id IN ("+placeholders(len(ids))+")")
-		for _, id := range ids {
-			args = append(args, id)
-		}
+		idsJSON, _ := json.Marshal(ids)
+		where = append(where, "n.id IN (SELECT value FROM json_each(?))")
+		args = append(args, string(idsJSON))
 	}
 
 	col, asc := "n.updated_at", false

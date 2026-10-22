@@ -80,7 +80,7 @@
       <h3>Change password</h3>
       <form class="stack" onsubmit={changePassword}>
         <input type="text" autocomplete="username" value={app.me?.username} hidden readonly />
-        <input type="password" placeholder="Current password" autocomplete="current-password" bind:value={current} required />
+        <input type="password" placeholder="Current password" data-autofocus autocomplete="current-password" bind:value={current} required />
         <input type="password" placeholder="New password (10+ characters)" autocomplete="new-password" minlength="10" bind:value={next} required />
         <input type="password" placeholder="Repeat new password" autocomplete="new-password" bind:value={repeat} required />
         {#if pwError}<p class="form-error">{pwError}</p>{/if}

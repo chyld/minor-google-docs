@@ -3,9 +3,12 @@
 import { api } from './api';
 import { drafts } from './drafts';
 import { NoteSaver } from './saver';
+import { stripMarker, swapRef } from './ids';
+import { uploads } from './uploads.svelte';
 import type { SaverDeps } from './saver';
 
 const savers = new Map<string, NoteSaver>();
+const released = new WeakSet<NoteSaver>();
 
 export const saverDeps: SaverDeps = {
   save: (id, body, base, keepalive) => api.saveBody(id, body, base, keepalive),
@@ -15,6 +18,11 @@ export const saverDeps: SaverDeps = {
 
 export function existingSaver(noteId: string): NoteSaver | undefined {
   return savers.get(noteId);
+}
+
+/** The editor is using this saver (again): it must not be disposed by an earlier release. */
+export function claimSaver(s: NoteSaver) {
+  released.delete(s);
 }
 
 export function createSaver(noteId: string, key: string, body: string, sha: string): NoteSaver {
@@ -27,9 +35,11 @@ export function createSaver(noteId: string, key: string, body: string, sha: stri
 /** The editor moved on from this note: finish its saves in the background. */
 export function releaseSaver(s: NoteSaver, onError: () => void) {
   s.onChange = () => {};
+  released.add(s);
   s.flush()
     .catch(() => {})
     .finally(() => {
+      if (!released.has(s)) return; // re-opened meanwhile: the editor owns it again
       if (s.conflict || s.status === 'error') onError();
       if (!s.dirty && !s.conflict && !s.busy && savers.get(s.noteId) === s) {
         s.dispose();
@@ -51,6 +61,48 @@ export function unloadAll() {
   for (const s of savers.values()) s.unload();
 }
 
-export function flushAll(): Promise<void> {
-  return Promise.all([...savers.values()].map((s) => s.flush())).then(() => {});
+export function draftAll() {
+  for (const s of savers.values()) s.writeDraft();
 }
+
+/** The open editor registers here so marker changes for its note apply to the
+ * screen; other notes are changed through their saver or on the server. */
+interface LiveEditor {
+  noteId: string;
+  removeMarker(ref: string): void;
+  replaceRef(oldRef: string, newRef: string): void;
+}
+let liveEditor: LiveEditor | null = null;
+
+export function setLiveEditor(e: LiveEditor | null) {
+  liveEditor = e;
+}
+
+async function rewriteNote(noteId: string, fn: (body: string) => string, live: (e: LiveEditor) => void) {
+  if (liveEditor?.noteId === noteId) return live(liveEditor);
+  const s = savers.get(noteId);
+  if (s) {
+    const next = fn(s.pending);
+    if (next !== s.pending) {
+      s.edit(next);
+      void s.flush();
+    }
+    return;
+  }
+  // Not open and nothing pending: edit the saved copy. A 409 means it changed
+  // elsewhere; that copy wins and the marker just shows "image not found".
+  try {
+    const n = await api.getNote(noteId);
+    const next = fn(n.body);
+    if (next !== n.body) await api.saveBody(noteId, next, n.sha256);
+  } catch {
+    /* best effort */
+  }
+}
+
+// A canceled upload's marker goes away; a re-minted ref is rewritten — in
+// whichever note it was pasted into, open or not.
+uploads.onCancel((noteId, ref) => void rewriteNote(noteId, (b) => stripMarker(b, ref), (e) => e.removeMarker(ref)));
+uploads.onRefChange((noteId, oldRef, newRef) =>
+  void rewriteNote(noteId, (b) => swapRef(b, oldRef, newRef), (e) => e.replaceRef(oldRef, newRef)),
+);

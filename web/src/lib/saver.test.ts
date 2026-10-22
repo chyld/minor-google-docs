@@ -122,6 +122,19 @@ describe('NoteSaver', () => {
     expect(srv.body).toBe('offline text');
   });
 
+  it('drops the draft when the text goes back to what is saved', async () => {
+    const srv = new FakeServer();
+    const drafts = new Map<string, string>();
+    const s = new NoteSaver('n', 'k', 'v0', 'sha:v0', srv.deps(drafts));
+    s.edit('v0x');
+    await vi.advanceTimersByTimeAsync(300); // draft written
+    expect(drafts.get('k')).toBe('v0x');
+    s.edit('v0'); // typo deleted before autosave
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(drafts.has('k')).toBe(false);
+    expect(srv.calls.length).toBe(0);
+  });
+
   it('a retried save that already landed is accepted (idempotent server)', async () => {
     const srv = new FakeServer();
     const s = new NoteSaver('n', 'k', 'v0', 'sha:v0', srv.deps(new Map()));

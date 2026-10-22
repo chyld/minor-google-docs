@@ -95,7 +95,7 @@ func (s *Server) csrf(next http.Handler) http.Handler {
 			}
 			if o := r.Header.Get("Origin"); o != "" {
 				u, err := url.Parse(o)
-				if err != nil || !strings.EqualFold(u.Host, s.externalHost(r)) {
+				if err != nil || !strings.EqualFold(u.Host, s.externalHost(r)) || (s.isSecure(r) && u.Scheme != "https") {
 					writeErr(w, http.StatusForbidden, "csrf", "cross-origin request refused")
 					return
 				}
@@ -105,16 +105,14 @@ func (s *Server) csrf(next http.Handler) http.Handler {
 	})
 }
 
-// deadlines bounds request bodies for everything except tus PATCH/POST and downloads.
+// deadlines bounds every request before anything else runs (including requests
+// that CSRF or auth will reject). Accepted uploads and downloads then switch to
+// sliding deadlines (slidingReads/slidingWrites), so they may take hours but not stall.
 func (s *Server) deadlines(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		long := strings.HasPrefix(r.URL.Path, "/api/uploads/") ||
-			(r.Method == http.MethodGet && (strings.HasPrefix(r.URL.Path, "/api/attachments/") || r.URL.Path == "/api/export"))
-		if !long {
-			rc := http.NewResponseController(w)
-			rc.SetReadDeadline(time.Now().Add(60 * time.Second))
-			rc.SetWriteDeadline(time.Now().Add(120 * time.Second))
-		}
+		rc := http.NewResponseController(w)
+		rc.SetReadDeadline(time.Now().Add(60 * time.Second))
+		rc.SetWriteDeadline(time.Now().Add(120 * time.Second))
 		next.ServeHTTP(w, r)
 	})
 }
@@ -126,9 +124,13 @@ const transferIdle = 2 * time.Minute
 // long uploads are fine but a stalled one is cut off.
 func slidingReads(w http.ResponseWriter, r *http.Request) io.Reader {
 	rc := http.NewResponseController(w)
-	rc.SetReadDeadline(time.Now().Add(transferIdle))
-	return readerFunc(func(p []byte) (int, error) {
+	extend := func() {
 		rc.SetReadDeadline(time.Now().Add(transferIdle))
+		rc.SetWriteDeadline(time.Now().Add(transferIdle)) // the response comes after the (long) body
+	}
+	extend()
+	return readerFunc(func(p []byte) (int, error) {
+		extend()
 		return r.Body.Read(p)
 	})
 }

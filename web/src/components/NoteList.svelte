@@ -4,7 +4,7 @@
   import { hue } from '../lib/colors';
   import { relativeTime, fullTime } from '../lib/format';
   import type { Sort } from '../lib/types';
-  import { menu } from '../lib/a11y';
+  import { composing, menu } from '../lib/a11y';
   import { existingSaver } from '../lib/savers';
   import Icon from './Icon.svelte';
 
@@ -137,6 +137,7 @@
         bind:value={app.query}
         oninput={onSearch}
         onkeydown={(e) => {
+          if (composing(e)) return;
           if (e.key === 'Escape') {
             app.query = '';
             app.loadList();

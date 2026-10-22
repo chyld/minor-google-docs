@@ -4,7 +4,9 @@ package db
 import (
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -57,12 +59,14 @@ func Open(dataDir string) (*DB, error) {
 	r.SetMaxOpenConns(4)
 	spath := filepath.Join(dataDir, "db", "search.sqlite")
 	s, err := openSearch(spath)
-	if err != nil {
+	if errors.Is(err, errDamaged) {
 		// The index is derived: move a damaged one aside and start fresh (reconcile rebuilds it).
 		bad := fmt.Sprintf("%s.corrupt-%d", spath, time.Now().Unix())
+		slog.Warn("search index is damaged; moving it aside and rebuilding", "moved_to", bad, "err", err)
 		for _, suf := range []string{"", "-wal", "-shm"} {
 			os.Rename(spath+suf, bad+suf)
 		}
+		pruneCorrupt(spath, 2)
 		s, err = openSearch(spath)
 	}
 	if err != nil {
@@ -117,6 +121,32 @@ func migrate(db *sql.DB) error {
 	return nil
 }
 
+var errDamaged = errors.New("search index damaged")
+
+// damaged reports SQLite errors that mean the file itself is bad (as opposed
+// to e.g. a full disk or a read-only mount, where moving it aside won't help).
+func damaged(err error) bool {
+	m := strings.ToLower(err.Error())
+	return strings.Contains(m, "malformed") || strings.Contains(m, "not a database") || strings.Contains(m, "corrupt")
+}
+
+// pruneCorrupt keeps only the newest `keep` quarantined copies of path.
+func pruneCorrupt(path string, keep int) {
+	old, _ := filepath.Glob(path + ".corrupt-*")
+	var bases []string
+	for _, f := range old {
+		if !strings.HasSuffix(f, "-wal") && !strings.HasSuffix(f, "-shm") {
+			bases = append(bases, f)
+		}
+	}
+	sort.Strings(bases) // unix-time suffixes sort chronologically
+	for i := 0; i+keep < len(bases); i++ {
+		for _, suf := range []string{"", "-wal", "-shm"} {
+			os.Remove(bases[i] + suf)
+		}
+	}
+}
+
 func openSearch(path string) (*sql.DB, error) {
 	s, err := sql.Open("sqlite", dsn(path, true))
 	if err != nil {
@@ -125,12 +155,18 @@ func openSearch(path string) (*sql.DB, error) {
 	s.SetMaxOpenConns(1)
 	if err := s.Ping(); err != nil {
 		s.Close()
+		if damaged(err) {
+			return nil, fmt.Errorf("%w: %v", errDamaged, err)
+		}
 		return nil, err
 	}
 	var ok string
 	if err := s.QueryRow(`PRAGMA quick_check`).Scan(&ok); err != nil || ok != "ok" {
 		s.Close()
-		return nil, fmt.Errorf("search index damaged: %v %s", err, ok)
+		if err != nil && !damaged(err) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: %v %s", errDamaged, err, ok)
 	}
 	_, err = s.Exec(`
 CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
@@ -138,6 +174,9 @@ CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
 CREATE TABLE IF NOT EXISTS indexed(note_id TEXT PRIMARY KEY, content_sha256 TEXT NOT NULL);`)
 	if err != nil {
 		s.Close()
+		if damaged(err) {
+			return nil, fmt.Errorf("%w: %v", errDamaged, err)
+		}
 		return nil, err
 	}
 	return s, nil

@@ -106,3 +106,65 @@ acting on it. Status: ✅ fixed · 📝 spec/docs updated instead · ⏭ deferre
 |---|---|---|---|
 | T1 | No Vitest for save queue / drafts | GLM | ✅ `saver.test.ts` |
 | T2 | No Playwright E2E | GLM | ⏸ deferred — flows verified by hand in Chromium (palette, menus, shortcuts, paste, cancel, mobile); Go + vitest suites cover the protocols |
+
+---
+
+# Code Review — Round 2 (team beta re-reviews the round-1 fixes)
+
+Each reviewer re-checked their round-1 findings against the fixed code and hunted for
+regressions. All verdicts: **ship after fixes**. Alpha verified each new finding in the
+code before fixing it. Codex's first attempt was refused by its provider's safety filter and
+re-run as a correctness review; MiniMax's first run returned no report and was re-run.
+
+## Round-1 fixes that turned out partial
+| # | What was missing | By | Status |
+|---|---|---|---|
+| D3 | `doctor --fix` could recreate a note mid-purge; `.bak` restore didn't refresh metadata | Sonnet | ✅ trashed notes are left to reconcile; restore re-checks the row and updates title/size/hash/index |
+| D7 | `unindex` ignored per-statement errors | Sonnet | ✅ errors roll back and are logged |
+| E4 | Duplicate didn't check the save result | Muse, Sonnet | ✅ refuses while unsaved/conflicted |
+| E7 | Titles could split flag emoji / Hangul jamo | Muse | ✅ regional-indicator pairs and jamo/Mc handled |
+| U1 | Cancel only edited the note on screen | Grok | ✅ markers removed in any note (open editor, background saver, or saved copy) |
+| U3 | Recovery HEAD raced the final PATCH and could delete a finished file | Grok, Codex | ✅ HEAD/create take the attachment lock; `markReady` treats "already ready" as success |
+| A7, A10, A17 | Mobile status still color-only; tiny buttons <40 px; panel progress bars unlabeled | MiMo | ✅ status word shown; 40 px hit areas; `role=progressbar` |
+| S4 | Rejected requests had no deadline | Codex | ✅ deadlines set before CSRF/auth; accepted transfers slide |
+| Q1 | Search silently capped at 1000 candidates; re-saved notes fell off | DeepSeek | ✅ no cap (ids passed via `json_each`), paged in one query |
+
+## New findings
+| # | Finding | By | Status |
+|---|---|---|---|
+| R1 | Password change could undo an admin reset / leave a session after revocation | Codex | ✅ one transaction conditioned on old hash + live session; new session issued inside it |
+| R2 | Concurrent uploads each passed the free-space check against the same bytes | Codex, Grok | ✅ process-wide leases + 64 MiB re-checks for all uploads |
+| R3 | Import read whole files into memory (zip bombs); folder import followed symlinks out | Codex | ✅ reads capped (10 MiB note, 64 MiB manifest) on actual bytes; `os.OpenRoot`; regular files only |
+| R4 | Malformed PHC (`t=0`) could panic and pin the Argon2 semaphore | Codex | ✅ parameter/salt/key bounds; release deferred |
+| R5 | Origin check ignored scheme | Codex | ✅ https required when the request is secure |
+| R6 | Stale draft resurrected deleted text | Sonnet | ✅ draft deleted whenever text equals the saved copy |
+| R7 | "Stay" on the leave-page prompt caused a false conflict | Sonnet | ✅ beforeunload only drafts; keepalive save moved to `pagehide` |
+| R8 | Re-opened note's saver could be disposed by an earlier release; stale text on reopen | Sonnet, Muse | ✅ release/claim tracking; load waits for the in-flight save |
+| R9 | Opening a trashed note deleted its draft | Muse | ✅ kept (offered again after restore) |
+| R10 | Duplicate marker lines survived cancel | Muse | ✅ all lines for the ref removed / rewritten |
+| R11 | NUL in a search matched every note | DeepSeek | ✅ rejected (also invalid UTF-8, >1000 bytes) |
+| R12 | No snippet for matches past 256 KiB | DeepSeek | ✅ chunked scan with overlap |
+| R13 | Missed index updates never retried; unbounded goroutines when queue full | DeepSeek | ✅ hourly `IndexSweep` (hash compare, no file reads); queue drops instead of spawning |
+| R14 | Any search-DB open error treated as corruption; quarantined copies piled up | DeepSeek | ✅ only real damage quarantined, logged, newest 2 kept |
+| R15 | Export aborted mid-zip if a note/file was deleted meanwhile | Sonnet | ✅ skipped |
+| R16 | Reconcile could un-index a just-created note; finished "purges" on a mis-mounted volume | Sonnet | ✅ index snapshot first + re-check; missing notes folder → skip |
+| R17 | IME: Enter/Escape during composition triggered actions | MiMo | ✅ `isComposing` guards everywhere |
+| R18 | Mobile drawer: no Escape, content behind focusable | MiMo | ✅ Escape closes; list/editor inert; focus moves in and back |
+| R19 | Ctrl+K / Alt+N acted behind open dialogs; stacked dialogs fought over keys | MiMo | ✅ guarded; dialog stack — only the top one handles keys |
+| R20 | Account dialog opened with focus on `<body>` | MiMo | ✅ focuses the password field |
+| R21 | White text on the light end of the brand gradient < AA | MiMo | ✅ deeper gradient for text-bearing surfaces |
+| R22 | Upload flow had no automated tests (client or HTTP) | GLM | ✅ `tus_test.go` (HTTP) + `uploads.test.ts` (client, scripted fake server) |
+| R23 | Cache-Control not asserted; stale comments; SPEC §12/§13 drift | GLM | ✅ |
+| R24 | Two exports in the same second collided | MiniMax | ✅ unique `Stamp()` shared with backups |
+| R25 | Restore recipe failed for a host user ≠ PUID (data is 0700) | MiniMax | 📝 README uses `sudo` and says why |
+| R26 | Notes created by CLI commands (welcome note) weren't indexed while the server ran | MiniMax | ✅ CLI indexes synchronously (`SyncIndex`) |
+| R27 | SPEC said `/healthz` doesn't touch the DB/disk | MiniMax | 📝 SPEC §9 describes the real check |
+| R28 | `notes gc` reported "not found" when the server purged the same note first | MiniMax | ✅ treated as done; README notes on running gc/doctor live |
+| R29 | `user rm --purge-data` confirmation failed for names typed with spaces; TTY need undocumented | MiniMax | ✅ normalized compare; README says `exec -it` |
+| R30 | Interrupted backups left `.partial` files; backups only on the same disk | MiniMax | ✅ stale partials pruned; 📝 README cron recipe for off-box backups |
+
+Round-2 checks: `go vet`, `go test` (core + server, incl. 9 new core tests and the tus HTTP
+suite), `svelte-check` 0 errors, Vitest 15/15. Re-tested in Chromium on the deployed container:
+password change round trip, dialog focus/stacking, IME guards, cancel while the note is
+not open, mobile drawer. CLI: `user add` against a running server → welcome note found by
+search; two exports in the same second → two files.

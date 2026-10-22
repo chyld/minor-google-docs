@@ -139,6 +139,53 @@ func (s *Store) SetPassword(ctx context.Context, uid, password, actor string) er
 	return nil
 }
 
+// ChangePassword is the self-service change: it applies only if the stored hash
+// is still oldHash, the account is enabled and the caller's session still
+// exists. All sessions are revoked and a fresh one for the caller is created in
+// the same transaction. ErrNotFound means one of those conditions failed.
+func (s *Store) ChangePassword(ctx context.Context, uid, oldHash, password string, sessionHash []byte, userAgent string) (string, error) {
+	if err := auth.ValidatePassword(password); err != nil {
+		return "", Invalid("%s", err.Error())
+	}
+	hash, err := auth.HashPassword(password)
+	if err != nil {
+		return "", err
+	}
+	token, tokHash, err := auth.NewToken()
+	if err != nil {
+		return "", err
+	}
+	if len(userAgent) > 200 {
+		userAgent = userAgent[:200]
+	}
+	tx, err := s.DB.W.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE users SET password_hash=?, updated_at=? WHERE id=? AND password_hash=? AND disabled=0
+AND EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND user_id=?)`, hash, now(), uid, oldHash, sessionHash, uid)
+	if err != nil {
+		return "", err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return "", ErrNotFound
+	}
+	if _, err := tx.Exec(`DELETE FROM sessions WHERE user_id=?`, uid); err != nil {
+		return "", err
+	}
+	t := time.Now()
+	if _, err := tx.Exec(`INSERT INTO sessions(token_hash,user_id,created_at,last_seen_at,expires_at,absolute_expires_at,user_agent) VALUES(?,?,?,?,?,?,?)`,
+		tokHash, uid, t.UnixMilli(), t.UnixMilli(), t.Add(SessionIdle).UnixMilli(), t.Add(SessionAbsolute).UnixMilli(), userAgent); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	s.Audit(uid, "user.passwd", uid)
+	return token, nil
+}
+
 func (s *Store) SetDisabled(ctx context.Context, name string, disabled bool) error {
 	u, _, err := s.UserByName(ctx, name)
 	if err != nil {

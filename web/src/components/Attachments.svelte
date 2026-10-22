@@ -96,7 +96,15 @@
         <span class="att-icon" style="--h:{k.hue}"><Icon name={t.status === 'error' ? 'alert' : 'upload'} size={16} /></span>
         <div class="att-body">
           <div class="att-name" title={t.filename}>{t.filename}</div>
-          <div class="progress" class:error={t.status === 'error'}><span style="width:{t.size ? (t.sent / t.size) * 100 : 100}%"></span></div>
+          <div
+            class="progress"
+            class:error={t.status === 'error'}
+            role="progressbar"
+            aria-label="{t.filename} upload progress"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-valuenow={Math.round(t.size ? (t.sent / t.size) * 100 : 100)}
+          ><span style="width:{t.size ? (t.sent / t.size) * 100 : 100}%"></span></div>
           <div class="muted small">
             {#if t.status === 'error'}<span class="danger">{t.error}</span>
             {:else if t.status === 'retrying'}Connection lost — retrying…

@@ -6,7 +6,7 @@
   import { search, searchKeymap } from '@codemirror/search';
   import { markers } from '../lib/editor/markers';
   import { stamp } from '../lib/format';
-  import { markerLine } from '../lib/ids';
+  import { MARKER_RE, markerLine } from '../lib/ids';
 
   interface Props {
     readonly?: boolean;
@@ -120,28 +120,32 @@
     view.focus();
   }
 
-  /** Remove the marker line for ref (its upload was canceled). */
+  /** Remove every marker line for ref (its upload was canceled). */
   export function removeMarker(ref: string) {
     if (!view) return;
     const doc = view.state.doc;
+    const changes = [];
     for (let i = 1; i <= doc.lines; i++) {
       const line = doc.line(i);
-      if (line.text.startsWith(`[image:${ref}]`)) {
+      if (MARKER_RE.exec(line.text)?.[1] === ref) {
         const to = line.to < doc.length ? line.to + 1 : line.to;
         const from = line.to < doc.length || line.from === 0 ? line.from : line.from - 1;
-        view.dispatch({ changes: { from, to } });
-        return;
+        changes.push({ from, to });
       }
     }
+    if (changes.length) view.dispatch({ changes });
   }
 
-  /** Rewrite a marker ref (used when the server rejected a ref as taken). */
+  /** Rewrite every marker for oldRef (the server rejected the ref as taken). */
   export function replaceRef(oldRef: string, newRef: string) {
     if (!view) return;
-    const doc = view.state.doc.toString();
-    const needle = `[image:${oldRef}]`;
-    const i = doc.indexOf(needle);
-    if (i >= 0) view.dispatch({ changes: { from: i, to: i + needle.length, insert: `[image:${newRef}]` } });
+    const doc = view.state.doc;
+    const changes = [];
+    for (let i = 1; i <= doc.lines; i++) {
+      const line = doc.line(i);
+      if (MARKER_RE.exec(line.text)?.[1] === oldRef) changes.push({ from: line.from + 7, to: line.from + 7 + oldRef.length, insert: newRef });
+    }
+    if (changes.length) view.dispatch({ changes });
   }
 </script>
 

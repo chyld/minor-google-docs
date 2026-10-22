@@ -89,7 +89,7 @@ func (s *Server) Routes() http.Handler {
 	})
 	mux.Handle("/", spaHandler())
 
-	return s.logRequests(s.securityHeaders(s.csrf(s.deadlines(mux))))
+	return s.logRequests(s.deadlines(s.securityHeaders(s.csrf(mux))))
 }
 
 // ListenAndServe runs the HTTP server until ctx is cancelled.

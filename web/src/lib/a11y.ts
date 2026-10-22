@@ -7,10 +7,17 @@ function focusables(node: HTMLElement): HTMLElement[] {
   return [...node.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => el.getClientRects().length > 0);
 }
 
-let openDialogs = 0;
+// Open dialogs, innermost last: only the top one handles keys, so a stacked
+// dialog's Escape doesn't also close the one beneath it.
+const stack: HTMLElement[] = [];
 
 function setInert(on: boolean) {
   document.querySelector('.shell')?.toggleAttribute('inert', on);
+}
+
+/** True while an IME is composing (Enter/Escape belong to the IME then). */
+export function composing(e: KeyboardEvent) {
+  return e.isComposing || e.keyCode === 229;
 }
 
 /** Moves the node to <body> (so an inert app shell doesn't swallow it). */
@@ -26,14 +33,19 @@ export function portal(node: HTMLElement) {
 export function dialog(node: HTMLElement, opts: { onclose: () => void }) {
   let onclose = opts.onclose;
   const prev = document.activeElement as HTMLElement | null;
-  openDialogs++;
+  stack.push(node);
   setInert(true);
   queueMicrotask(() => {
     if (node.contains(document.activeElement)) return;
-    const target = node.querySelector<HTMLElement>('[data-autofocus], input:not([type="hidden"])') ?? focusables(node)[0] ?? node;
+    const target =
+      node.querySelector<HTMLElement>('[data-autofocus]') ??
+      focusables(node).find((el) => el.tagName === 'INPUT') ??
+      focusables(node)[0] ??
+      node;
     target.focus();
   });
   const onkey = (e: KeyboardEvent) => {
+    if (stack[stack.length - 1] !== node || composing(e)) return;
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
@@ -63,8 +75,8 @@ export function dialog(node: HTMLElement, opts: { onclose: () => void }) {
     },
     destroy() {
       window.removeEventListener('keydown', onkey, true);
-      openDialogs = Math.max(0, openDialogs - 1);
-      setInert(openDialogs > 0);
+      stack.splice(stack.indexOf(node), 1);
+      setInert(stack.length > 0);
       if (prev && document.contains(prev)) prev.focus();
     },
   };
@@ -81,6 +93,7 @@ export function menu(node: HTMLElement, opts: { onclose: () => void }) {
     if (refocus && trigger && document.contains(trigger)) trigger.focus();
   };
   const onkey = (e: KeyboardEvent) => {
+    if (composing(e)) return;
     const list = items();
     const i = list.indexOf(document.activeElement as HTMLElement);
     switch (e.key) {

@@ -14,8 +14,23 @@ import (
 )
 
 // Reconcile repairs derived metadata from the files (file wins) and brings the
-// search index up to date. Runs at startup and hourly.
+// search index up to date. Runs at startup, after `notes import` and in
+// `notes gc` — not hourly (the janitor's IndexSweep covers index drift).
 func (s *Store) Reconcile(ctx context.Context) error {
+	// Snapshot the index before the notes: a note created in between then looks
+	// "not indexed yet" (harmless) rather than "indexed but gone" (would unindex it).
+	indexed := map[string]string{}
+	irows, err := s.DB.Search.QueryContext(ctx, `SELECT note_id,content_sha256 FROM indexed`)
+	if err != nil {
+		return err
+	}
+	for irows.Next() {
+		var id, sha string
+		irows.Scan(&id, &sha)
+		indexed[id] = sha
+	}
+	irows.Close()
+
 	rows, err := s.DB.R.QueryContext(ctx, `SELECT id,user_id,content_sha256,trashed_at IS NOT NULL FROM notes`)
 	if err != nil {
 		return err
@@ -35,18 +50,6 @@ func (s *Store) Reconcile(ctx context.Context) error {
 		notes = append(notes, r)
 	}
 	rows.Close()
-
-	indexed := map[string]string{}
-	irows, err := s.DB.Search.QueryContext(ctx, `SELECT note_id,content_sha256 FROM indexed`)
-	if err != nil {
-		return err
-	}
-	for irows.Next() {
-		var id, sha string
-		irows.Scan(&id, &sha)
-		indexed[id] = sha
-	}
-	irows.Close()
 
 	repaired, reindexed := 0, 0
 	for _, n := range notes {
@@ -84,8 +87,13 @@ func (s *Store) Reconcile(ctx context.Context) error {
 		}
 		delete(indexed, n.id)
 	}
+	gone := func(id string) bool { // re-check: the note may have been created after our snapshot
+		return !s.exists(ctx, `SELECT 1 FROM notes WHERE id=?`, id)
+	}
 	for id := range indexed {
-		s.unindex(id)
+		if gone(id) {
+			s.unindex(id)
+		}
 	}
 	// FTS rows whose bookkeeping row is gone (crash mid-unindex)
 	if frows, err := s.DB.Search.QueryContext(ctx, `SELECT DISTINCT note_id FROM notes_fts`); err == nil {
@@ -103,7 +111,9 @@ func (s *Store) Reconcile(ctx context.Context) error {
 		}
 		frows.Close()
 		for _, id := range dead {
-			s.unindex(id)
+			if gone(id) {
+				s.unindex(id)
+			}
 		}
 	}
 	// stray temp files from interrupted saves (old ones only: young ones may be mid-rename)
@@ -117,6 +127,11 @@ func (s *Store) Reconcile(ctx context.Context) error {
 	}
 	// finish purges interrupted after the files were deleted
 	for _, g := range ghosts {
+		// a missing notes folder means a mis-mounted volume, not an interrupted purge
+		if _, err := os.Stat(filepath.Join(s.Dir, "users", g[0], "notes")); err != nil {
+			s.Log.Warn("notes folder missing; not finishing purges (check the data volume)", "user", g[0])
+			continue
+		}
 		if err := s.PurgeNote(ctx, g[0], g[1], "reconcile"); err != nil {
 			s.Log.Warn("finishing interrupted purge", "note", g[1], "err", err)
 		}
@@ -152,7 +167,10 @@ func (s *Store) JanitorOnce(ctx context.Context) error {
 		due, err := s.trashPurgeDue(ctx, s.Cfg.TrashDays)
 		errs = append(errs, err)
 		for _, p := range due {
-			errs = append(errs, s.PurgeNote(ctx, p[0], p[1], "janitor"))
+			// ErrNotFound: purged meanwhile (e.g. by the server while `notes gc` runs) — done either way
+			if err := s.PurgeNote(ctx, p[0], p[1], "janitor"); !errors.Is(err, ErrNotFound) {
+				errs = append(errs, err)
+			}
 		}
 	}
 	if n, err := s.GCUploads(ctx, 24*time.Hour); err != nil || n > 0 {
@@ -179,6 +197,7 @@ func (s *Store) JanitorOnce(ctx context.Context) error {
 		}
 	}
 	errs = append(errs, err)
+	errs = append(errs, s.IndexSweep(ctx))
 	return errors.Join(errs...)
 }
 
@@ -225,24 +244,40 @@ func (s *Store) Doctor(ctx context.Context, fix bool) (*DoctorReport, error) {
 		return nil, err
 	}
 	nids, _ := scanStrings(nrows)
+	// restore writes the file and its derived metadata, unless the note was
+	// trashed or purged meanwhile (a trashed note without a file is an
+	// interrupted purge, which reconcile finishes — don't resurrect it).
+	restore := func(uid, id string, body []byte, msg string) {
+		if !s.exists(ctx, `SELECT 1 FROM notes WHERE id=? AND user_id=? AND trashed_at IS NULL`, id, uid) {
+			return
+		}
+		if err := fsx.WriteAtomic(s.notePath(uid, id), body); err != nil {
+			return
+		}
+		text := string(body)
+		s.DB.W.ExecContext(ctx, `UPDATE notes SET title=?,preview=?,size_bytes=?,content_sha256=? WHERE id=? AND user_id=?`,
+			DeriveTitle(text), DerivePreview(text), len(body), fsx.HashBytes(body), id, uid)
+		s.enqueueIndex(id)
+		r.Fixed = append(r.Fixed, msg)
+	}
 	for _, n := range nids {
 		notes[n] = true
 		parts := strings.SplitN(n, "/", 2)
 		if _, err := os.Stat(s.notePath(parts[0], parts[1])); errors.Is(err, fs.ErrNotExist) {
+			if s.exists(ctx, `SELECT 1 FROM notes WHERE id=? AND trashed_at IS NOT NULL`, parts[1]) {
+				add("note %s is in the trash and has no file (an interrupted purge; finished on next start or `notes gc`)", parts[1])
+				continue
+			}
 			bak := s.notePath(parts[0], parts[1]) + ".bak"
 			if b, err := os.ReadFile(bak); err == nil {
 				add("note %s has no file (previous version available in .bak)", parts[1])
 				if fix {
-					if err := fsx.WriteAtomic(s.notePath(parts[0], parts[1]), b); err == nil {
-						r.Fixed = append(r.Fixed, "restored note "+parts[1]+" from its .bak")
-					}
+					restore(parts[0], parts[1], b, "restored note "+parts[1]+" from its .bak")
 				}
 			} else {
 				add("note %s has no file and no .bak", parts[1])
 				if fix {
-					if err := fsx.WriteAtomic(s.notePath(parts[0], parts[1]), nil); err == nil {
-						r.Fixed = append(r.Fixed, "recreated note "+parts[1]+" as an empty note")
-					}
+					restore(parts[0], parts[1], []byte{}, "recreated note "+parts[1]+" as an empty note")
 				}
 			}
 		}

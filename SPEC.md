@@ -369,7 +369,9 @@ secure when the request arrived over TLS or via trusted proxy with `proto=https`
 
 - **Janitor** (in `serve`, hourly): purge notes trashed > `NOTES_TRASH_DAYS` (default 30, `0` = never),
   GC stale uploads, sweep sessions, retry `deleting` rows. Every purge logged + audited.
-- `/healthz`: liveness only, no DB lock, no version/user info.
+- `/healthz`: no version/user info. Checks that the server can answer (`SELECT 1` on the
+  metadata DB, no write lock) and that `data/tmp` is writable (a tiny temp file is created and
+  removed) — a read-only or full volume makes it 503, which is the point: the app can't save.
 - Restore: stop, put `data/` back (or untar backup), delete `search.sqlite`, start (reindexes).
 
 ### Config (env)
@@ -433,23 +435,27 @@ note's images, zoom-to-fit) · range downloads.
 
 ## 12. UI / visual design
 
-- **Layout:** sidebar 240 px · note list 320 px (resizable) · editor fluid. Focus mode
+- **Layout:** sidebar 248 px (220 px on narrow screens; Ctrl+\ hides it) · note list 340 px
+  (drag to resize, 260–560 px, remembered) · editor fluid. Focus mode
   (Ctrl+Shift+F) hides both side panes. Mobile: list → editor push navigation with back
   button, tags as a horizontal chip scroller, attachments as a bottom sheet, floating
   new-note button, PWA manifest (installable, no offline).
 - **Surfaces:** tinted neutrals, never pure black/white (light canvas ≈ `#f6f3eb`, ink `#1c2430`;
-  dark canvas ≈ `#16141f`). Trash view desaturates the whole surface.
+  dark canvas ≈ `#16141f`). Trash view desaturates the note cards and the open note.
 - **Color system:** 12 tag hues defined once in OKLCH with matched lightness; each has
   light/dark chip bg (`color-mix` ~16%) + text pair verified ≥ 4.5:1. Hue drives chip,
-  note-card 3 px accent stripe, sidebar dot. One brand gradient: logo, primary button,
-  empty states, login mesh. Everything else flat.
+  note-card 3 px accent stripe, sidebar dot. One brand gradient: logo, empty states, login
+  mesh; surfaces carrying white text (primary button, new-note button, badges) use a deeper
+  version of it so the text meets AA. Everything else flat.
 - **Type:** self-hosted Inter (UI) · editor proportional 16–17 px / 1.65, ~68 ch measure,
   no gutter, soft wrap; mono toggle (JetBrains Mono). First line styled as a large title.
 - **Note list:** cards — title, one preview line (marker lines skipped), relative time,
-  tag dots, pin/attachment icons; hover reveals actions without layout shift; skeleton
-  loading; virtualized.
+  tag dots, pin/attachment icons; hover reveals pin/trash actions without layout shift;
+  skeleton loading. Not virtualized: cards use `content-visibility: auto`, which keeps
+  thousands of cards cheap to render and is simpler than windowing for homelab-sized lists.
 - **Editor chrome:** none while typing. Save status = 6 px dot (amber saving, green saved,
-  red error) + tooltip; never a toast for autosave. Drop overlay with gradient dashed border.
+  red error) plus a short word ("Saved", "Saving…") and an `aria-live` announcement; never
+  a toast for autosave. Drop overlay with gradient dashed border.
 - **Motion:** 120–160 ms, transform/opacity only, honors `prefers-reduced-motion`.
 - **Empty states:** soft gradient orb + one line + shortcut hint. First login seeds a
   "Welcome" note explaining shortcuts and image paste.
@@ -466,8 +472,13 @@ note's images, zoom-to-fit) · range downloads.
 - Go: `t.TempDir()` fixtures; save protocol incl. 409 race (concurrent saves), crash between
   rename and commit → reconcile; purge ordering; upload resume / cancel / finalize / GC;
   **cross-user IDOR suite** (user B gets 404 for every user A id on every route); FTS escaping;
-  marker parsing; CSRF/Origin checks.
-- Frontend: Vitest for marker parser, save queue, draft recovery.
+  marker parsing; CSRF/Origin checks; tus over HTTP (create, repeat create, HEAD metadata,
+  offset mismatch, foreign ids, empty final PATCH, DELETE); concurrent finalize recovery;
+  shared free-space leases; search with >1000 hits; password change vs. admin reset.
+- Frontend: Vitest for marker parser, save queue (chaining, conflicts, retries, idempotent
+  retry), stale-draft cleanup, and the upload client (cancel mid-create, `ref_taken`
+  resume vs. re-mint, completing a half-finalized upload) against a scripted fake server.
+  Draft restore on load (IndexedDB) is covered manually; it needs a browser.
 - E2E (Playwright, against `docker compose up`): login → create → type → paste image →
   reload → image renders → tag → search finds it → upload 2 GB file with simulated drop +
   resume → export zip.

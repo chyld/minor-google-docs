@@ -10,6 +10,7 @@
   import Account from './components/Account.svelte';
   import Overlays from './components/Overlays.svelte';
   import Icon from './components/Icon.svelte';
+  import { composing } from './lib/a11y';
 
   let list: NoteList | undefined = $state();
   let listWidth = $state(Number(localStorage.getItem('notes.listWidth')) || 340);
@@ -23,6 +24,19 @@
     apply();
     mq.addEventListener('change', apply);
     return () => mq.removeEventListener('change', apply);
+  });
+
+  // mobile drawer: while open, the rest of the app is inert and focus moves in (and back)
+  $effect(() => {
+    if (!app.sidebarOpen) return;
+    const prev = document.activeElement as HTMLElement | null;
+    const behind = [...document.querySelectorAll<HTMLElement>('.shell > .list, .shell > .main')];
+    behind.forEach((el) => (el.inert = true));
+    queueMicrotask(() => document.querySelector<HTMLElement>('.sidebar .nav-item')?.focus());
+    return () => {
+      behind.forEach((el) => (el.inert = false));
+      if (prev && document.contains(prev)) prev.focus();
+    };
   });
 
   // after login: load data
@@ -56,15 +70,18 @@
   const modalOpen = () => app.paletteOpen || app.accountOpen || app.shortcutsOpen || !!document.querySelector('[aria-modal="true"]');
 
   function onkeydown(e: KeyboardEvent) {
-    if (!app.me) return;
+    if (!app.me || composing(e)) return;
     const mod = e.ctrlKey || e.metaKey;
     const k = e.key.toLowerCase();
     if (mod && k === 'k') {
       e.preventDefault();
-      app.paletteOpen = !app.paletteOpen;
+      if (app.paletteOpen) app.paletteOpen = false;
+      else if (!modalOpen()) app.paletteOpen = true;
     } else if (e.altKey && k === 'n' && !mod) {
       e.preventDefault();
-      app.newNote();
+      if (!modalOpen()) app.newNote();
+    } else if (e.key === 'Escape' && app.sidebarOpen && !modalOpen()) {
+      app.sidebarOpen = false;
     } else if (mod && e.shiftKey && k === 'f') {
       e.preventDefault();
       app.focusMode = !app.focusMode;

@@ -76,6 +76,7 @@ func run(cmd string, args []string) error {
 		return err
 	}
 	defer store.Close()
+	store.SyncIndex = cmd != "serve"
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -102,7 +103,7 @@ func run(cmd string, args []string) error {
 		if err != nil {
 			return fmt.Errorf("user %q: %w", args[0], err)
 		}
-		dest := filepath.Join(cfg.DataDir, "backups", fmt.Sprintf("export-%s-%s.zip", u.Username, time.Now().UTC().Format("20060102T150405Z")))
+		dest := filepath.Join(cfg.DataDir, "backups", fmt.Sprintf("export-%s-%s.zip", u.Username, core.Stamp()))
 		if len(args) == 2 {
 			dest = args[1]
 		}
@@ -308,7 +309,7 @@ func userCmd(ctx context.Context, store *core.Store, args []string) error {
 			}
 			fmt.Printf("This permanently deletes every note and file of %q.\nType the username to confirm: ", pos[0])
 			line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-			if strings.TrimSpace(line) != strings.ToLower(pos[0]) {
+			if strings.ToLower(strings.TrimSpace(line)) != strings.ToLower(strings.TrimSpace(pos[0])) {
 				return errors.New("confirmation did not match; nothing deleted")
 			}
 		}

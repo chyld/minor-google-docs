@@ -51,12 +51,13 @@ func VerifyPassword(pw, phc string) bool {
 	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &m, &t, &p); err != nil {
 		return false
 	}
-	if m > 1<<20 || t > 16 || p == 0 { // refuse absurd params from a tampered DB
+	// refuse absurd params from a tampered DB (t=0 or tiny m would panic in argon2)
+	if m < 8*uint32(max(p, 1)) || m > 1<<20 || t == 0 || t > 16 || p == 0 {
 		return false
 	}
 	salt, err1 := b64.DecodeString(parts[4])
 	want, err2 := b64.DecodeString(parts[5])
-	if err1 != nil || err2 != nil || len(want) == 0 {
+	if err1 != nil || err2 != nil || len(salt) < 8 || len(want) < 16 || len(want) > 64 {
 		return false
 	}
 	got := argon2.IDKey([]byte(pw), salt, t, m, p, uint32(len(want)))

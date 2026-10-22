@@ -80,10 +80,13 @@ export class NoteSaver {
     this.schedule(this.autosaveMs);
   }
 
+  /** Mirror unsaved text to the draft store — and drop the draft once there's nothing unsaved
+   * (e.g. typed then deleted before autosave), so a stale draft can't come back later. */
   writeDraft() {
     clearTimeout(this.draftTimer);
     this.draftTimer = undefined;
     if (this.dirty || this.conflict) this.deps.putDraft(this.draftKey, this.pending, this.baseSha);
+    else this.deps.deleteDraft(this.draftKey);
   }
 
   schedule(ms: number) {
@@ -101,9 +104,14 @@ export class NoteSaver {
     while (this.inflight) await this.inflight;
     if (this.disposed && !this.dirty) return;
     if (this.conflict || !this.dirty) {
-      if (!this.conflict && this.status !== 'saved') {
-        this.status = 'saved';
-        this.emit();
+      if (!this.conflict) {
+        clearTimeout(this.draftTimer);
+        this.draftTimer = undefined;
+        this.deps.deleteDraft(this.draftKey);
+        if (this.status !== 'saved') {
+          this.status = 'saved';
+          this.emit();
+        }
       }
       return;
     }
@@ -196,7 +204,9 @@ export class NoteSaver {
     return c.body;
   }
 
-  /** Best effort on page unload: keepalive save + draft. */
+  /** Best effort when the page is really going away (pagehide): keepalive save + draft.
+   * Not on beforeunload — the user may still choose to stay, and a save we don't
+   * hear back from would leave our base sha stale (→ a false conflict). */
   unload() {
     this.writeDraft();
     if (this.dirty && !this.conflict && !this.inflight) {

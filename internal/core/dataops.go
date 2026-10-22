@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -30,8 +31,7 @@ func (s *Store) Backup(ctx context.Context, destDir string) (string, error) {
 	if err := os.MkdirAll(destDir, fsx.DirMode); err != nil {
 		return "", err
 	}
-	// unique even for backups started in the same second; still sorts by time
-	ts := time.Now().UTC().Format("20060102T150405Z") + "-" + fsxRand()
+	ts := Stamp()
 	snap := filepath.Join(s.Dir, "tmp", "backup-"+ts+".sqlite")
 	if _, err := s.DB.W.ExecContext(ctx, `VACUUM INTO ?`, snap); err != nil {
 		return "", fmt.Errorf("db snapshot: %w", err)
@@ -110,6 +110,13 @@ func addFile(tw *tar.Writer, path, name string) error {
 }
 
 func (s *Store) pruneBackups(dir string) {
+	// leftovers of interrupted backups
+	partial, _ := filepath.Glob(filepath.Join(dir, "notes-*.tar.gz.partial"))
+	for _, p := range partial {
+		if st, err := os.Stat(p); err == nil && time.Since(st.ModTime()) > 24*time.Hour {
+			os.Remove(p)
+		}
+	}
 	m, _ := filepath.Glob(filepath.Join(dir, "notes-*.tar.gz"))
 	sort.Strings(m)
 	for len(m) > s.Cfg.BackupKeep {
@@ -184,10 +191,13 @@ func (s *Store) Export(ctx context.Context, uid string, w io.Writer) error {
 			folder = "trash"
 		}
 		name := unique(folder + "/" + safeName(m.Title) + ".txt")
-		body, err := s.readBody(uid, m.ID)
-		if err != nil {
+		b, err := os.ReadFile(s.notePath(uid, m.ID))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // purged while we were exporting
+		} else if err != nil {
 			return err
 		}
+		body := string(b)
 		fw, err := zw.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Deflate, Modified: time.UnixMilli(m.UpdatedAt)})
 		if err != nil {
 			return err
@@ -206,13 +216,16 @@ func (s *Store) Export(ctx context.Context, uid string, w io.Writer) error {
 			return err
 		}
 		for _, a := range atts {
+			f, err := os.Open(s.filePath(uid, a.ID))
+			if errors.Is(err, fs.ErrNotExist) {
+				continue // deleted while we were exporting
+			} else if err != nil {
+				return err
+			}
 			ap := unique("attachments/" + safeName(m.Title) + "/" + a.Filename)
 			fw, err := zw.CreateHeader(&zip.FileHeader{Name: ap, Method: zip.Store, Modified: time.UnixMilli(a.CreatedAt)})
 			if err != nil {
-				return err
-			}
-			f, err := os.Open(s.filePath(uid, a.ID))
-			if err != nil {
+				f.Close()
 				return err
 			}
 			_, err = io.Copy(fw, f)
@@ -273,19 +286,27 @@ func (s *Store) Import(ctx context.Context, uid, path string) (int, error) {
 		if !st.IsDir() {
 			return 0, fmt.Errorf("%s is not a folder or .zip", path)
 		}
-		fsys = os.DirFS(path)
+		// os.Root refuses symlinks (and ..) that lead outside the folder
+		root, err := os.OpenRoot(path)
+		if err != nil {
+			return 0, err
+		}
+		defer root.Close()
+		fsys = root.FS()
 	}
-	if mb, err := fs.ReadFile(fsys, "manifest.json"); err == nil {
+	if mb, err := readRegular(fsys, "manifest.json", maxManifestBytes); err == nil {
 		return s.importExport(ctx, uid, fsys, mb)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return 0, fmt.Errorf("manifest.json: %w", err)
 	}
 	n := 0
 	err := fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.EqualFold(filepath.Ext(p), ".txt") {
 			return err
 		}
-		b, err := fs.ReadFile(fsys, p)
+		b, err := readRegular(fsys, p, MaxBodyBytes)
 		if err != nil {
-			return err
+			return fmt.Errorf("%s: %w", p, err)
 		}
 		if _, err := s.CreateNote(ctx, uid, string(b)); err != nil {
 			return fmt.Errorf("%s: %w", p, err)
@@ -311,7 +332,7 @@ func (s *Store) importExport(ctx context.Context, uid string, fsys fs.FS, manife
 		return n, fmt.Errorf("import stopped after %d notes (at %q): %w", n, title, err)
 	}
 	for _, mn := range man.Notes {
-		body, err := fs.ReadFile(fsys, mn.File)
+		body, err := readRegular(fsys, mn.File, MaxBodyBytes)
 		if err != nil {
 			return fail(mn.Title, err)
 		}
@@ -321,7 +342,7 @@ func (s *Store) importExport(ctx context.Context, uid string, fsys fs.FS, manife
 		}
 		text := string(body)
 		for _, ma := range mn.Attachments {
-			f, err := fsys.Open(ma.File)
+			f, err := openRegular(fsys, ma.File)
 			if err != nil {
 				return fail(mn.Title, err)
 			}
@@ -360,9 +381,11 @@ func (s *Store) importExport(ctx context.Context, uid string, fsys fs.FS, manife
 
 // importAttachment stores r as a ready attachment of noteID, keeping wantRef if it is free.
 func (s *Store) importAttachment(ctx context.Context, uid, noteID string, r io.Reader, filename, wantRef string) (*Attachment, error) {
-	if err := s.reserve(-1); err != nil {
+	l, err := s.reserve(-1)
+	if err != nil {
 		return nil, err
 	}
+	defer l.release()
 	a := &Attachment{ID: NewID(), Ref: wantRef, NoteID: noteID, Filename: SanitizeFilename(filename), State: "uploading", CreatedAt: now()}
 	if !ValidRef(a.Ref) || s.exists(ctx, `SELECT 1 FROM attachments WHERE user_id=? AND ref=?`, uid, a.Ref) {
 		a.Ref = NewRef()
@@ -375,7 +398,7 @@ func (s *Store) importAttachment(ctx context.Context, uid, noteID string, r io.R
 	if err != nil {
 		return nil, err
 	}
-	size, err := io.Copy(&guardedWriter{f: f, s: s, check: true}, r)
+	size, err := io.Copy(&guardedWriter{f: f, l: l}, r)
 	if err == nil {
 		err = f.Sync()
 	}
@@ -396,6 +419,50 @@ func (s *Store) importAttachment(ctx context.Context, uid, noteID string, r io.R
 		return nil, err
 	}
 	return a, nil
+}
+
+const maxManifestBytes = 64 << 20
+
+// openRegular opens name only if it is a regular file (no devices, fifos or dirs).
+func openRegular(fsys fs.FS, name string) (fs.File, error) {
+	f, err := fsys.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		f.Close()
+		return nil, fmt.Errorf("%s is not a regular file", name)
+	}
+	return f, nil
+}
+
+// readRegular reads a regular file, refusing anything larger than limit
+// (checked on the bytes actually read, so compressed sizes can't lie).
+func readRegular(fsys fs.FS, name string, limit int64) ([]byte, error) {
+	f, err := openRegular(fsys, name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > limit {
+		return nil, fmt.Errorf("%s is larger than %d MiB", name, limit>>20)
+	}
+	return b, nil
+}
+
+// Stamp is a file-name timestamp that sorts by time and stays unique even for
+// two backups/exports started in the same second.
+func Stamp() string {
+	return time.Now().UTC().Format("20060102T150405Z") + "-" + fsxRand()
 }
 
 func fsxRand() string {

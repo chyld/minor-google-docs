@@ -3,7 +3,7 @@
   import { api } from '../lib/api';
   import { hue } from '../lib/colors';
   import type { NoteMeta } from '../lib/types';
-  import { dialog } from '../lib/a11y';
+  import { composing, dialog } from '../lib/a11y';
   import Icon from './Icon.svelte';
 
   type Item =
@@ -97,6 +97,7 @@
   }
 
   function onkeydown(e: KeyboardEvent) {
+    if (composing(e)) return;
     if (e.key === 'ArrowDown') move((active + 1) % Math.max(items.length, 1));
     else if (e.key === 'ArrowUp') move((active - 1 + items.length) % Math.max(items.length, 1));
     else if (e.key === 'Enter' && items[active]) choose(items[active]);

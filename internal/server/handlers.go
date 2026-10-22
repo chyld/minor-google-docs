@@ -51,17 +51,19 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	user, hash, err := s.store.UserByName(r.Context(), name)
 	ok := false
-	switch {
-	case err == nil:
-		ok = auth.VerifyPassword(req.Password, hash) && !user.Disabled
-	case errors.Is(err, core.ErrNotFound):
-		auth.VerifyPassword(req.Password, s.dummyHash) // equalize timing
-	default:
-		s.limiter.Release()
+	func() {
+		defer s.limiter.Release()
+		switch {
+		case err == nil:
+			ok = auth.VerifyPassword(req.Password, hash) && !user.Disabled
+		case errors.Is(err, core.ErrNotFound):
+			auth.VerifyPassword(req.Password, s.dummyHash) // equalize timing
+		}
+	}()
+	if err != nil && !errors.Is(err, core.ErrNotFound) {
 		s.serverError(w, r, err)
 		return
 	}
-	s.limiter.Release()
 	var token string
 	if ok {
 		token, err = s.store.CreateSessionVerified(r.Context(), user.ID, hash, r.UserAgent())
@@ -124,20 +126,28 @@ func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusTooManyRequests, "busy", "Server busy, try again in a moment.")
 		return
 	}
-	hash, err := s.store.PasswordHash(r.Context(), sess.User.ID)
-	ok := err == nil && auth.VerifyPassword(req.Current, hash)
-	s.limiter.Release()
+	var hash string
+	var ok bool
+	func() {
+		defer s.limiter.Release()
+		var err error
+		hash, err = s.store.PasswordHash(r.Context(), sess.User.ID)
+		ok = err == nil && auth.VerifyPassword(req.Current, hash)
+	}()
 	if !ok {
 		writeErr(w, http.StatusBadRequest, "invalid", "Current password is wrong.")
 		return
 	}
-	if err := s.store.SetPassword(r.Context(), sess.User.ID, req.New, sess.User.ID); err != nil {
-		s.fail(w, r, err)
+	// Only applies if the password is still the one we just verified and this
+	// session is still alive (an admin reset meanwhile wins).
+	token, err := s.store.ChangePassword(r.Context(), sess.User.ID, hash, req.New, sess.TokenHash, r.UserAgent())
+	if errors.Is(err, core.ErrNotFound) {
+		s.clearSessionCookies(w, r)
+		writeErr(w, http.StatusUnauthorized, "unauthorized", "Your password was changed elsewhere. Please log in again.")
 		return
 	}
-	token, err := s.store.CreateSession(r.Context(), sess.User.ID, r.UserAgent())
 	if err != nil {
-		s.serverError(w, r, err)
+		s.fail(w, r, err)
 		return
 	}
 	s.setSessionCookie(w, r, token, int(core.SessionAbsolute.Seconds()))

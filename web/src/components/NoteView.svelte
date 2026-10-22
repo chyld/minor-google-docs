@@ -10,7 +10,7 @@
   import { hue } from '../lib/colors';
   import { menu } from '../lib/a11y';
   import type { NoteSaver, SaveStatus, Conflict } from '../lib/saver';
-  import { anyUnsaved, createSaver, existingSaver, forgetSaver, releaseSaver, unloadAll } from '../lib/savers';
+  import { anyUnsaved, claimSaver, createSaver, draftAll, existingSaver, forgetSaver, releaseSaver, setLiveEditor, unloadAll } from '../lib/savers';
   import type { Attachment, Note } from '../lib/types';
   import Editor from './Editor.svelte';
   import TagInput from './TagInput.svelte';
@@ -72,6 +72,15 @@
     conflict = s.conflict;
   }
 
+  /** Let canceled uploads / re-minted refs edit what's on screen for this note. */
+  function goLive(nid: string) {
+    setLiveEditor({
+      noteId: nid,
+      removeMarker: (ref) => editor?.removeMarker(ref),
+      replaceRef: (a, b) => editor?.replaceRef(a, b),
+    });
+  }
+
   function setText(text: string) {
     pending = text;
     clearTimeout(countTimer);
@@ -88,8 +97,12 @@
     status = 'saved';
     lightboxRef = null;
     menuOpen = false;
+    setLiveEditor(null);
     editor?.setDoc('', true); // read-only until we know what to show
     try {
+      // a save still running from a moment ago must land first, or we'd fetch the old text
+      await existingSaver(nid)?.flush().catch(() => {});
+      if (seq !== loadSeq) return;
       const [n, d] = await Promise.all([api.getNote(nid), drafts.get(draftKey(nid))]);
       if (seq !== loadSeq) return;
       registry.seed(n.attachments);
@@ -99,10 +112,12 @@
 
       const live = existingSaver(nid);
       if (live && (live.dirty || live.conflict) && !n.trashed_at) {
-        // still saving from a moment ago (switched away and back): keep its state
+        // unsaved work from a moment ago (switched away and back): keep its state
+        claimSaver(live);
         attachSaver(live);
         setText(live.pending);
         editor?.setDoc(live.pending);
+        goLive(nid);
         void live.flush();
         return;
       }
@@ -118,11 +133,14 @@
         } else {
           s.setConflict({ body: n.body, sha: n.sha256, reason: 'draft' });
         }
+        goLive(nid);
         return;
       }
-      if (d) drafts.delete(draftKey(nid));
+      // a trashed note keeps its draft: it is offered again if the note is restored
+      if (d && !n.trashed_at) drafts.delete(draftKey(nid));
       setText(n.body);
       editor?.setDoc(n.body, !!n.trashed_at);
+      if (!n.trashed_at) goLive(nid);
       if (!n.body.trim() && !n.trashed_at) editor?.focus();
     } catch (e) {
       if (seq !== loadSeq) return;
@@ -237,6 +255,10 @@
     if (!note) return;
     menuOpen = false;
     await saveNow(); // so the copy has what you just typed
+    if (saver?.dirty || saver?.conflict) {
+      app.toast('Resolve the unsaved changes before duplicating this note.', 'error');
+      return;
+    }
     try {
       const m = await api.duplicate(note.id);
       app.notes = [m, ...app.notes];
@@ -289,12 +311,6 @@
       if (!note.attachments.some((a) => a.id === att.id)) note.attachments = [...note.attachments, att];
       app.upsert({ id: note.id, attachment_count: note.attachments.length });
     });
-    const offRef = uploads.onRefChange((nid, oldRef, newRef) => {
-      if (note?.id === nid) editor.replaceRef(oldRef, newRef);
-    });
-    const offCancel = uploads.onCancel((nid, ref) => {
-      if (note?.id === nid) editor.removeMarker(ref);
-    });
     const onLightbox = (e: Event) => (lightboxRef = (e as CustomEvent).detail.ref);
     const onSave = () => void saveNow();
     const onHide = () => {
@@ -303,23 +319,27 @@
         void saveNow();
       }
     };
+    // beforeunload may be canceled ("Stay"), so only drafts are written there;
+    // the keepalive save goes out on pagehide, when the page is really leaving.
     const onUnload = (e: BeforeUnloadEvent) => {
-      unloadAll();
+      draftAll();
       if (anyUnsaved() || uploads.active) e.preventDefault();
     };
+    const onPageHide = () => unloadAll();
     window.addEventListener('notes:lightbox', onLightbox);
     window.addEventListener('notes:save', onSave);
     document.addEventListener('visibilitychange', onHide);
     window.addEventListener('beforeunload', onUnload);
+    window.addEventListener('pagehide', onPageHide);
     return () => {
+      setLiveEditor(null);
       if (saver) releaseSaver(saver, () => {});
       offDone();
-      offRef();
-      offCancel();
       window.removeEventListener('notes:lightbox', onLightbox);
       window.removeEventListener('notes:save', onSave);
       document.removeEventListener('visibilitychange', onHide);
       window.removeEventListener('beforeunload', onUnload);
+      window.removeEventListener('pagehide', onPageHide);
     };
   });
 

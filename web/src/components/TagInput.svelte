@@ -2,6 +2,7 @@
   import { app } from '../lib/state.svelte';
   import { api } from '../lib/api';
   import { hue } from '../lib/colors';
+  import { composing } from '../lib/a11y';
   import Icon from './Icon.svelte';
 
   interface Props {
@@ -47,6 +48,7 @@
   }
 
   function onkeydown(e: KeyboardEvent) {
+    if (composing(e)) return;
     const total = suggestions.length + (canCreate ? 1 : 0);
     if (e.key === 'Enter' || e.key === ',' || e.key === 'Tab') {
       if (!text.trim() && e.key === 'Tab') return;

@@ -90,14 +90,31 @@ func truncateRunes(s string, n int) string {
 	}
 	r := []rune(s)
 	cut := n - 1
-	// never split a grapheme: back off over combining marks, ZWJ sequences and variation selectors
-	for cut > 0 && (joinsPrevious(r[cut]) || r[cut-1] == '\u200d') {
+	// never split a grapheme: back off over combining marks, ZWJ sequences,
+	// variation selectors, Hangul jamo and the second half of a flag pair
+	for cut > 0 && (joinsPrevious(r[cut]) || r[cut-1] == '\u200d' || splitsFlag(r, cut)) {
 		cut--
 	}
 	return strings.TrimSpace(string(r[:cut])) + "…"
 }
 
 func joinsPrevious(r rune) bool {
-	return unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r) || r == '\u200d' ||
-		(r >= 0xfe00 && r <= 0xfe0f) || (r >= 0x1f3fb && r <= 0x1f3ff) || (r >= 0xe0020 && r <= 0xe007f)
+	return unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r) || unicode.Is(unicode.Mc, r) || r == '\u200d' ||
+		(r >= 0xfe00 && r <= 0xfe0f) || (r >= 0x1f3fb && r <= 0x1f3ff) || (r >= 0xe0020 && r <= 0xe007f) ||
+		(r >= 0x1160 && r <= 0x11ff) || (r >= 0xd7b0 && r <= 0xd7ff) // Hangul medial vowels / final consonants
+}
+
+func isRegionalIndicator(r rune) bool { return r >= 0x1f1e6 && r <= 0x1f1ff }
+
+// splitsFlag reports whether cutting before r[i] would leave half of a flag
+// (flags are pairs of regional indicators, counted from the start of the run).
+func splitsFlag(r []rune, i int) bool {
+	if !isRegionalIndicator(r[i]) {
+		return false
+	}
+	run := 0
+	for j := i - 1; j >= 0 && isRegionalIndicator(r[j]); j-- {
+		run++
+	}
+	return run%2 == 1
 }

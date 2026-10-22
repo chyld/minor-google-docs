@@ -18,21 +18,19 @@ type Segment struct {
 	Hit  bool   `json:"hit,omitempty"`
 }
 
-const (
-	maxSearchHits  = 1000      // candidate notes considered per query
-	snippetReadMax = 256 << 10 // bytes of a note read to build its snippet
-)
+const snippetChunk = 256 << 10 // notes are scanned for a snippet in chunks of this size
 
 // ftsPhrase escapes user input as a single FTS5 phrase.
 func ftsPhrase(q string) string { return `"` + strings.ReplaceAll(q, `"`, `""`) + `"` }
 
-// searchIDs returns ids of the user's notes matching q in the body/title (FTS)
-// or title / attachment file name (metadata DB).
+// searchIDs returns ids of all the user's notes matching q in the body/title
+// (FTS) or title / attachment file name (metadata DB). No cap: ids are cheap,
+// and paging happens in the list query so every match is reachable.
 func (s *Store) searchIDs(ctx context.Context, uid, q string) ([]string, error) {
 	ids := map[string]bool{}
 	if utf8.RuneCountInString(q) >= 3 {
 		rows, err := s.DB.Search.QueryContext(ctx,
-			`SELECT note_id FROM notes_fts WHERE notes_fts MATCH ? AND user_id=? LIMIT ?`, ftsPhrase(q), uid, maxSearchHits)
+			`SELECT note_id FROM notes_fts WHERE notes_fts MATCH ? AND user_id=?`, ftsPhrase(q), uid)
 		if err == nil {
 			found, err := scanStrings(rows)
 			if err != nil {
@@ -48,8 +46,7 @@ func (s *Store) searchIDs(ctx context.Context, uid, q string) ([]string, error) 
 	like := "%" + escapeLike(q) + "%"
 	rows, err := s.DB.R.QueryContext(ctx, `
 SELECT id FROM notes WHERE user_id=? AND title LIKE ? ESCAPE '\'
-UNION SELECT note_id FROM attachments WHERE user_id=? AND state='ready' AND filename LIKE ? ESCAPE '\'
-LIMIT ?`, uid, like, uid, like, maxSearchHits)
+UNION SELECT note_id FROM attachments WHERE user_id=? AND state='ready' AND filename LIKE ? ESCAPE '\'`, uid, like, uid, like)
 	if err != nil {
 		return nil, err
 	}
@@ -67,18 +64,30 @@ LIMIT ?`, uid, like, uid, like, maxSearchHits)
 	return out, nil
 }
 
-// addSnippets fills Snippet for each item from (at most the first 256 KiB of) its file.
+// addSnippets fills Snippet for each item, scanning its file in chunks until
+// the first match (so a hit deep in a large note still gets context).
 func (s *Store) addSnippets(uid, q string, items []NoteMeta) {
-	buf := make([]byte, snippetReadMax)
+	const overlap = 1 << 10 // carried between chunks so a match/context isn't cut
+	buf := make([]byte, overlap+snippetChunk)
 	for i := range items {
 		f, err := os.Open(s.notePath(uid, items[i].ID))
 		if err != nil {
 			continue
 		}
-		n, _ := io.ReadFull(f, buf)
+		carry := 0
+		for {
+			n, err := io.ReadFull(f, buf[carry:])
+			text := StripMarkers(strings.ToValidUTF8(string(buf[:carry+n]), "")) // a cut mid-rune is dropped
+			if seg := Snippet(text, q); seg != nil {
+				items[i].Snippet = seg
+				break
+			}
+			if err != nil { // EOF / short read: no more chunks
+				break
+			}
+			carry = copy(buf, buf[carry+n-overlap:carry+n])
+		}
 		f.Close()
-		// a cut mid-rune at the 256 KiB boundary is dropped by ToValidUTF8
-		items[i].Snippet = Snippet(StripMarkers(strings.ToValidUTF8(string(buf[:n]), "")), q)
 	}
 }
 
@@ -139,11 +148,65 @@ func Snippet(body, q string) []Segment {
 // ---- index maintenance ----
 
 func (s *Store) enqueueIndex(id string) {
+	if s.SyncIndex {
+		if err := s.indexNote(context.Background(), id); err != nil {
+			s.Log.Warn("index update failed", "note", id, "err", err)
+		}
+		return
+	}
 	select {
 	case s.indexCh <- id:
-	default: // queue full: hand off without blocking the request
-		go func() { s.indexCh <- id }()
+	default: // queue full: the hourly IndexSweep picks it up
+		s.Log.Warn("index queue full; note will be indexed by the next sweep", "note", id)
 	}
+}
+
+// IndexSweep re-indexes notes whose indexed hash differs from the metadata
+// hash (a missed queue slot or a failed index write). It compares hashes only,
+// without reading note files, so it is cheap enough to run hourly.
+func (s *Store) IndexSweep(ctx context.Context) error {
+	rows, err := s.DB.Search.QueryContext(ctx, `SELECT note_id, content_sha256 FROM indexed`)
+	if err != nil {
+		return err
+	}
+	indexed := map[string]string{}
+	for rows.Next() {
+		var id, sha string
+		if err := rows.Scan(&id, &sha); err != nil {
+			rows.Close()
+			return err
+		}
+		indexed[id] = sha
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows, err = s.DB.R.QueryContext(ctx, `SELECT id, content_sha256 FROM notes`)
+	if err != nil {
+		return err
+	}
+	var stale []string
+	for rows.Next() {
+		var id, sha string
+		if err := rows.Scan(&id, &sha); err != nil {
+			rows.Close()
+			return err
+		}
+		if indexed[id] != sha {
+			stale = append(stale, id)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, id := range stale {
+		if err := s.indexNote(ctx, id); err != nil {
+			s.Log.Warn("index sweep failed", "note", id, "err", err)
+		}
+	}
+	return nil
 }
 
 // RunIndexer processes queued index updates until ctx is cancelled.
@@ -195,12 +258,20 @@ func (s *Store) indexNote(ctx context.Context, id string) error {
 }
 
 func (s *Store) unindex(id string) {
-	tx, err := s.DB.Search.Begin()
-	if err == nil {
-		tx.Exec(`DELETE FROM notes_fts WHERE note_id=?`, id)
-		tx.Exec(`DELETE FROM indexed WHERE note_id=?`, id)
-		err = tx.Commit()
-	}
+	err := func() error {
+		tx, err := s.DB.Search.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if _, err := tx.Exec(`DELETE FROM notes_fts WHERE note_id=?`, id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM indexed WHERE note_id=?`, id); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}()
 	if err != nil {
 		s.Log.Warn("unindex failed (reconcile will retry)", "note", id, "err", err)
 	}

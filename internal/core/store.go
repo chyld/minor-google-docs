@@ -51,6 +51,11 @@ type Store struct {
 
 	locks   keyedMutex
 	indexCh chan string
+	space   spaceLeases
+
+	// SyncIndex indexes on the spot instead of queueing. CLI commands set it:
+	// they have no background indexer, so queued updates would be lost.
+	SyncIndex bool
 }
 
 func Open(cfg *config.Config, log *slog.Logger) (*Store, error) {

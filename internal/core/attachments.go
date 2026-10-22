@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode"
@@ -97,9 +98,11 @@ func (s *Store) CreateUpload(ctx context.Context, uid string, m UploadMeta) (*At
 	} else if !errors.Is(err, ErrNotFound) {
 		return nil, err
 	}
-	if err := s.reserve(m.Length); err != nil {
+	l, err := s.reserve(m.Length)
+	if err != nil {
 		return nil, err
 	}
+	l.release() // just a check; bytes are leased when they arrive
 	nm, err := s.noteMeta(ctx, s.DB.R, uid, m.NoteID)
 	if err != nil {
 		return nil, err
@@ -143,6 +146,13 @@ func (s *Store) getAtt(ctx context.Context, uid, id string) (*Attachment, error)
 // It also completes an upload whose bytes were moved into place but whose row
 // was never marked ready (crash or disconnect during finalize).
 func (s *Store) UploadOffset(ctx context.Context, uid, id string) (*Attachment, int64, error) {
+	unlock := s.locks.Lock("att:" + id)
+	defer unlock()
+	return s.uploadOffset(ctx, uid, id)
+}
+
+// uploadOffset is UploadOffset for callers that already hold the attachment lock.
+func (s *Store) uploadOffset(ctx context.Context, uid, id string) (*Attachment, int64, error) {
 	a, err := s.getAtt(ctx, uid, id)
 	if err != nil {
 		return nil, 0, err
@@ -174,42 +184,106 @@ type OffsetMismatchError struct{ Actual int64 }
 
 func (e *OffsetMismatchError) Error() string { return "upload offset mismatch" }
 
-// reserve fails if writing n more bytes would dip below the free-space floor.
-// n < 0 means "unknown"; only the floor itself is checked.
-func (s *Store) reserve(n int64) error {
+// spaceLeases tracks bytes that in-flight uploads have announced but not yet
+// written, so concurrent uploads can't each pass the free-space check against
+// the same free bytes and then fill the disk together.
+type spaceLeases struct {
+	mu  sync.Mutex
+	out int64
+}
+
+const freeCheckEvery = 64 << 20
+
+// lease holds n bytes (n < 0: unknown length) against the free-space floor.
+type lease struct {
+	s       *Store
+	left    int64
+	unknown bool
+}
+
+// reserve fails if writing n more bytes (on top of everything other uploads
+// still have to write) would dip below the free-space floor. n < 0 = unknown.
+func (s *Store) reserve(n int64) (*lease, error) {
+	l := &lease{s: s, left: max(n, 0), unknown: n < 0}
 	if s.Cfg.MinFree <= 0 {
+		l.left = 0
+		return l, nil
+	}
+	s.space.mu.Lock()
+	defer s.space.mu.Unlock()
+	free, err := fsx.FreeBytes(s.Dir)
+	if err != nil {
+		return nil, err
+	}
+	if free-s.space.out-l.need() < s.Cfg.MinFree {
+		return nil, ErrNoSpace
+	}
+	s.space.out += l.left
+	return l, nil
+}
+
+func (l *lease) need() int64 {
+	if l.unknown {
+		return freeCheckEvery
+	}
+	return l.left
+}
+
+// wrote marks n leased bytes as on disk (they now show up in free space).
+func (l *lease) wrote(n int64) {
+	l.s.space.mu.Lock()
+	d := min(n, l.left)
+	l.left -= d
+	l.s.space.out -= d
+	l.s.space.mu.Unlock()
+}
+
+// check re-verifies the floor mid-stream (other processes may be using space too).
+func (l *lease) check() error {
+	if l.s.Cfg.MinFree <= 0 {
 		return nil
 	}
-	free, err := fsx.FreeBytes(s.Dir)
+	l.s.space.mu.Lock()
+	defer l.s.space.mu.Unlock()
+	free, err := fsx.FreeBytes(l.s.Dir)
 	if err != nil {
 		return err
 	}
-	if free < s.Cfg.MinFree || (n > 0 && free-n < s.Cfg.MinFree) {
+	extra := int64(0)
+	if l.unknown {
+		extra = freeCheckEvery
+	}
+	if free-l.s.space.out-extra < l.s.Cfg.MinFree {
 		return ErrNoSpace
 	}
 	return nil
 }
 
-// guardedWriter re-checks the free-space floor every 64 MiB while streaming a
-// body of unknown length, so one request can't fill the disk.
+func (l *lease) release() {
+	l.s.space.mu.Lock()
+	l.s.space.out -= l.left
+	l.left = 0
+	l.s.space.mu.Unlock()
+}
+
+// guardedWriter re-checks the free-space floor every 64 MiB while streaming,
+// so one request can't fill the disk.
 type guardedWriter struct {
 	f          *os.File
-	s          *Store
-	check      bool
+	l          *lease
 	sinceCheck int64
 }
 
-const freeCheckEvery = 64 << 20
-
 func (w *guardedWriter) Write(p []byte) (int, error) {
-	if w.check && w.sinceCheck >= freeCheckEvery {
+	if w.sinceCheck >= freeCheckEvery {
 		w.sinceCheck = 0
-		if err := w.s.reserve(freeCheckEvery); err != nil {
+		if err := w.l.check(); err != nil {
 			return 0, err
 		}
 	}
 	n, err := w.f.Write(p)
 	w.sinceCheck += int64(n)
+	w.l.wrote(int64(n))
 	return n, err
 }
 
@@ -218,7 +292,7 @@ func (w *guardedWriter) Write(p []byte) (int, error) {
 func (s *Store) AppendUpload(ctx context.Context, uid, id string, offset int64, newLength int64, r io.Reader) (*Attachment, int64, error) {
 	unlock := s.locks.Lock("att:" + id)
 	defer unlock()
-	a, cur, err := s.UploadOffset(ctx, uid, id)
+	a, cur, err := s.uploadOffset(ctx, uid, id)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -249,9 +323,11 @@ func (s *Store) AppendUpload(ctx context.Context, uid, id string, offset int64, 
 	if a.SizeBytes >= 0 {
 		remaining = a.SizeBytes - cur
 	}
-	if err := s.reserve(remaining); err != nil {
+	l, err := s.reserve(remaining)
+	if err != nil {
 		return nil, 0, err
 	}
+	defer l.release()
 	f, err := os.OpenFile(s.tmpPath(uid, id), os.O_WRONLY|os.O_APPEND, fsx.FileMode)
 	if err != nil {
 		return nil, 0, err
@@ -260,8 +336,7 @@ func (s *Store) AppendUpload(ctx context.Context, uid, id string, offset int64, 
 	if remaining >= 0 {
 		src = io.LimitReader(r, remaining)
 	}
-	// a declared length was reserved up front; unknown lengths are checked as they stream
-	gw := &guardedWriter{f: f, s: s, check: remaining < 0}
+	gw := &guardedWriter{f: f, l: l}
 	n, copyErr := io.Copy(gw, src)
 	syncErr := f.Sync()
 	f.Close()
@@ -318,6 +393,13 @@ func (s *Store) markReady(ctx context.Context, uid string, a *Attachment) error 
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
+		var state string
+		err := s.DB.W.QueryRowContext(ctx, `SELECT state FROM attachments WHERE id=? AND user_id=?`, a.ID, uid).Scan(&state)
+		if err == nil && state == "ready" {
+			a.State = "ready" // someone else finished it: that's success, keep the file
+			a.Inline = InlineImageTypes[a.Mime]
+			return nil
+		}
 		// purged/canceled meanwhile: don't leave the bytes behind
 		os.Remove(s.filePath(uid, a.ID))
 		return ErrNotFound

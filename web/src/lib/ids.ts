@@ -30,3 +30,21 @@ export function markerLine(ref: string, filename: string): string {
   const caption = filename.replace(/[\r\n]+/g, ' ').trim();
   return caption ? `[image:${ref}] ${caption}` : `[image:${ref}]`;
 }
+
+const isMarkerFor = (line: string, ref: string) => MARKER_RE.exec(line)?.[1] === ref;
+
+/** Remove every marker line for ref. */
+export function stripMarker(body: string, ref: string): string {
+  return body
+    .split('\n')
+    .filter((l) => !isMarkerFor(l, ref))
+    .join('\n');
+}
+
+/** Point every marker line for oldRef at newRef. */
+export function swapRef(body: string, oldRef: string, newRef: string): string {
+  return body
+    .split('\n')
+    .map((l) => (isMarkerFor(l, oldRef) ? `[image:${newRef}]` + l.slice(`[image:${oldRef}]`.length) : l))
+    .join('\n');
+}

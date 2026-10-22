@@ -51,13 +51,27 @@ Run any of these with `docker compose exec -it notes notes …`:
 | `user passwd <name>` | reset a password (signs the user out everywhere) |
 | `user list` | users, note counts, storage |
 | `user disable <name>` / `enable <name>` | lock or unlock an account |
-| `user rm <name> [--purge-data]` | remove a user; without `--purge-data` their files move to `lost+found/` |
+| `user rm <name> [--purge-data]` | remove a user; without `--purge-data` their files move to `lost+found/`. `--purge-data` asks you to type the name, so run it with `docker compose exec -it` |
 | `backup [dir]` | consistent snapshot → `data/backups/notes-<time>.tar.gz` (safe while running) |
 | `export <user> [file.zip]` | all notes as `.txt` + attachments + `manifest.json` (default: `data/backups/`) |
 | `import <user> <zip\|dir>` | restore an export (tags, pins, dates, files), or create notes from `.txt` files |
 | `reindex` | rebuild search |
 | `doctor [--fix]` | check files ↔ database; `--fix` moves orphan files to `lost+found/`, restores missing notes from `.bak` |
-| `gc` | run maintenance now (trash purge, stale uploads, sessions) |
+| `gc` | run maintenance now (trash purge, stale uploads, sessions) — the server already does this hourly |
+
+`doctor --fix` and `gc` can run while the server is up (they re-check before changing
+anything and leave files younger than 10 minutes alone), but for a big repair,
+`docker compose stop` first is the calm option.
+
+**Keep a copy off the box.** `data/backups/` lives on the same disk as your notes. Point
+`notes backup` somewhere else from cron, e.g. a mounted NAS share:
+
+```sh
+# crontab: 03:00 every night
+0 3 * * * cd /path/to/notes && docker compose exec -T notes notes backup /backups-nas
+```
+
+(mount that folder into the container in `compose.yaml`, e.g. `- /mnt/nas/notes:/backups-nas`).
 
 Users can also export their own data from **Account & data** in the app.
 
@@ -67,10 +81,13 @@ A restore **replaces** the data folder. Restore into a fresh one:
 
 ```sh
 docker compose down
-mv data data.old                                   # keep the old one until you're happy
-mkdir data && tar -xzf data.old/backups/notes-<time>.tar.gz -C data
+sudo mv data data.old                              # keep the old one until you're happy
+sudo mkdir data && sudo tar -xzf data.old/backups/notes-<time>.tar.gz -C data
 docker compose up -d                               # fixes ownership, rebuilds search
 ```
+
+`sudo` because the container keeps `data/` private to its own user (`PUID`, mode 0700); if your
+host user *is* `PUID`, you can drop it.
 
 The backup holds `db/notes.sqlite` (a consistent snapshot) and `users/`. Leftover `-wal`/`-shm`
 files from a live database never end up in it.

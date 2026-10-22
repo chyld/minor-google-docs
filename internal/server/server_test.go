@@ -215,6 +215,9 @@ func TestAttachmentServingHeaders(t *testing.T) {
 	if csp := res.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "sandbox") {
 		t.Errorf("csp = %q", csp)
 	}
+	if cc := res.Header.Get("Cache-Control"); cc != "private, no-cache" {
+		t.Errorf("cache-control = %q", cc)
+	}
 	evil := upload("a\"b\r\nX-Evil: 1.txt", "hi")
 	res = h.do(a, "GET", "/api/attachments/"+evil, "", nil)
 	if res.Header.Get("X-Evil") != "" || strings.ContainsAny(res.Header.Get("Content-Disposition"), "\r\n") {
