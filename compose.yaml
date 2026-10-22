@@ -1,0 +1,37 @@
+services:
+  notes:
+    build: .
+    image: homelab-notes:latest
+    container_name: notes
+    ports:
+      - "4444:4444"            # all interfaces
+    volumes:
+      - ./data:/data           # notes, files and metadata DB live here
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: "UTC"
+      # Comma-separated IPs/CIDRs of reverse proxies allowed to set X-Forwarded-*.
+      NOTES_TRUSTED_PROXIES: ""
+      # auto | true | false — "auto" marks cookies Secure when served over HTTPS.
+      NOTES_SECURE_COOKIES: "auto"
+      NOTES_TRASH_DAYS: "30"   # 0 = never auto-purge
+      NOTES_MIN_FREE: "1GiB"   # refuse new uploads below this much free disk (0 = off)
+      NOTES_BACKUP_KEEP: "7"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    # Needed by the entrypoint (fix ownership of /data) and su-exec. The app itself
+    # runs as PUID:PGID and holds no capabilities; `docker compose exec` as root keeps these.
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    stop_grace_period: 30s     # let in-flight uploads/saves finish on shutdown
+    healthcheck:
+      test: ["CMD", "notes", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

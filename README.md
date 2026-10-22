@@ -1,0 +1,117 @@
+# Notes — a private, plain-text notebook for your homelab
+
+A colorful, minimal, self-hosted notes web app.
+
+- **Plain text.** Every note is a `.txt` file on your server.
+- **Screenshots inline.** Paste (Ctrl+V) and the image appears right in the note.
+- **Any file, any size.** Resumable uploads; the disk is the only limit.
+- **Tags** with their own colors, **full-text search** (finds IPs, paths, hostnames), trash, pinning.
+- **Private per user.** Users are created from the command line only.
+- One Go binary + SQLite (metadata only) + a `data/` folder. Runs with Docker Compose.
+
+## Quick start
+
+```sh
+docker compose up -d --build
+docker compose exec -it notes notes user add yourname    # prompts for a password
+```
+
+Open **http://<server-ip>:4444** and sign in.
+
+## Where your data lives
+
+```
+data/
+├── db/notes.sqlite        metadata: users, tags, pins, trash state, attachment names
+├── db/search.sqlite       search index — safe to delete, rebuilt automatically
+├── users/<id>/notes/*.txt your notes (plain UTF-8 text) + one .bak of the previous version
+├── users/<id>/files/*     attachments and screenshots (raw bytes)
+├── backups/               output of `notes backup`
+└── lost+found/            anything `notes doctor --fix` or `user rm` set aside
+```
+
+Screenshots appear in the note text as a single marker line, so the `.txt` stays readable:
+
+```
+Server rack wiring today:
+[image:k7m2q9xh4t] rack-2026-10-21.png
+Need to relabel port 12.
+```
+
+**Back up both the files and the database.** Tags, pins and original file names exist only in
+`notes.sqlite`. The `.txt` files alone don't keep them.
+
+## Command line
+
+Run any of these with `docker compose exec -it notes notes …`:
+
+| Command | |
+|---|---|
+| `user add <name>` | create a user (`--password-stdin` for scripts) |
+| `user passwd <name>` | reset a password (signs the user out everywhere) |
+| `user list` | users, note counts, storage |
+| `user disable <name>` / `enable <name>` | lock or unlock an account |
+| `user rm <name> [--purge-data]` | remove a user; without `--purge-data` their files move to `lost+found/` |
+| `backup [dir]` | consistent snapshot → `data/backups/notes-<time>.tar.gz` (safe while running) |
+| `export <user> [file.zip]` | all notes as `.txt` + attachments + `manifest.json` (default: `data/backups/`) |
+| `import <user> <zip\|dir>` | restore an export (tags, pins, dates, files), or create notes from `.txt` files |
+| `reindex` | rebuild search |
+| `doctor [--fix]` | check files ↔ database; `--fix` moves orphan files to `lost+found/`, restores missing notes from `.bak` |
+| `gc` | run maintenance now (trash purge, stale uploads, sessions) |
+
+Users can also export their own data from **Account & data** in the app.
+
+### Restore
+
+A restore **replaces** the data folder. Restore into a fresh one:
+
+```sh
+docker compose down
+mv data data.old                                   # keep the old one until you're happy
+mkdir data && tar -xzf data.old/backups/notes-<time>.tar.gz -C data
+docker compose up -d                               # fixes ownership, rebuilds search
+```
+
+The backup holds `db/notes.sqlite` (a consistent snapshot) and `users/`. Leftover `-wal`/`-shm`
+files from a live database never end up in it.
+
+### Moving notes between accounts or servers
+
+`notes export alice` writes a zip to `data/backups/`. `notes import bob <that.zip>` recreates the
+notes with their tags, pins, dates and attachments, and remaps image markers if needed.
+`import` also accepts any folder of `.txt` files.
+
+## Configuration
+
+Set these in `compose.yaml` under `environment:`.
+
+| Variable | Default | |
+|---|---|---|
+| `NOTES_ADDR` | `:4444` | listen address (all interfaces) |
+| `PUID` / `PGID` | `1000` | owner of `data/` |
+| `NOTES_TRUSTED_PROXIES` | *(empty)* | IPs/CIDRs of reverse proxies allowed to set `X-Forwarded-*` |
+| `NOTES_SECURE_COOKIES` | `auto` | `auto` / `true` / `false` |
+| `NOTES_TRASH_DAYS` | `30` | auto-delete trashed notes after N days (`0` = never) |
+| `NOTES_MIN_FREE` | `1GiB` | refuse new uploads when free disk drops below this (`0` = off) |
+| `NOTES_BACKUP_KEEP` | `7` | backups kept by `notes backup` |
+
+`data/` must be on a **local disk**. Don't put it on an NFS or SMB share, because SQLite locking breaks there.
+
+Plain HTTP on your LAN works. To use HTTPS, put a reverse proxy in front: see
+[docs/reverse-proxy.md](docs/reverse-proxy.md).
+
+## Keyboard
+
+`Ctrl K` palette · `Alt N` new note · `/` search · `Ctrl S` save now · `Ctrl F` find in note ·
+`Alt T` insert timestamp · `Ctrl Shift F` focus mode · `j`/`k` move through the list · `?` all shortcuts
+
+## Development
+
+```sh
+cd web && npm install && npm run build && cd ..   # builds into internal/webui/dist
+go test ./... && (cd web && npm test && npm run check)
+NOTES_DATA_DIR=./data go run ./cmd/notes serve
+# live frontend: (cd web && npm run dev) → http://localhost:5173 (proxies /api to :4444)
+```
+
+The design spec is in [SPEC.md](SPEC.md), and the design review notes are in [REVIEWS.md](REVIEWS.md).

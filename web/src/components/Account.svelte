@@ -1,0 +1,97 @@
+<script lang="ts">
+  import { api, ApiError } from '../lib/api';
+  import { app } from '../lib/state.svelte';
+  import { bytes } from '../lib/format';
+  import type { Storage } from '../lib/types';
+  import { dialog } from '../lib/a11y';
+  import Icon from './Icon.svelte';
+
+  let storage = $state<Storage | null>(null);
+  let current = $state('');
+  let next = $state('');
+  let repeat = $state('');
+  let pwError = $state('');
+  let busy = $state(false);
+
+  $effect(() => {
+    api.storage().then((s) => (storage = s)).catch(() => {});
+  });
+
+  async function changePassword(e: SubmitEvent) {
+    e.preventDefault();
+    pwError = '';
+    if (next !== repeat) {
+      pwError = 'The new passwords do not match.';
+      return;
+    }
+    busy = true;
+    try {
+      await api.changePassword(current, next);
+      current = next = repeat = '';
+      app.toast('Password changed. Other devices were signed out.', 'success');
+    } catch (err) {
+      pwError = err instanceof ApiError ? err.message : 'Could not change password.';
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function logoutOthers() {
+    try {
+      const r = await api.logoutOthers();
+      app.toast(`Signed out ${r.revoked} other ${r.revoked === 1 ? 'session' : 'sessions'}.`, 'success');
+    } catch (e) {
+      app.error(e);
+    }
+  }
+
+  const close = () => (app.accountOpen = false);
+  const low = $derived(storage && storage.min_free_bytes > 0 && storage.free_bytes < storage.min_free_bytes * 2);
+</script>
+
+<div class="modal-wrap" role="presentation" use:dialog={{ onclose: close }}>
+  <button class="modal-scrim" aria-label="Close" tabindex="-1" onclick={close}></button>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="acct-title">
+    <header class="modal-head">
+      <h2 id="acct-title">Account & data</h2>
+      <button class="icon-btn" aria-label="Close" onclick={close}><Icon name="x" /></button>
+    </header>
+
+    <section class="modal-section">
+      <h3>Storage</h3>
+      {#if storage}
+        <div class="stats">
+          <div class="stat"><span class="stat-value">{bytes(storage.used_bytes)}</span><span class="muted small">used by your notes & files</span></div>
+          <div class="stat" class:warn={low}><span class="stat-value">{bytes(storage.free_bytes)}</span><span class="muted small">free on the server</span></div>
+        </div>
+        {#if low}<p class="small warn-text">The server is getting low on space. Uploads pause below {bytes(storage.min_free_bytes)} free.</p>{/if}
+      {:else}
+        <p class="muted">Loading…</p>
+      {/if}
+    </section>
+
+    <section class="modal-section">
+      <h3>Export</h3>
+      <p class="muted small">Download every note as a .txt file plus all attachments and a manifest, in one zip.</p>
+      <a class="btn" href="/api/export" download><Icon name="download" size={16} /> Download export</a>
+    </section>
+
+    <section class="modal-section">
+      <h3>Change password</h3>
+      <form class="stack" onsubmit={changePassword}>
+        <input type="text" autocomplete="username" value={app.me?.username} hidden readonly />
+        <input type="password" placeholder="Current password" autocomplete="current-password" bind:value={current} required />
+        <input type="password" placeholder="New password (10+ characters)" autocomplete="new-password" minlength="10" bind:value={next} required />
+        <input type="password" placeholder="Repeat new password" autocomplete="new-password" bind:value={repeat} required />
+        {#if pwError}<p class="form-error">{pwError}</p>{/if}
+        <button class="btn primary" disabled={busy}>Change password</button>
+      </form>
+    </section>
+
+    <section class="modal-section">
+      <h3>Sessions</h3>
+      <p class="muted small">Signed in somewhere you shouldn't be?</p>
+      <button class="btn" onclick={logoutOthers}><Icon name="logout" size={16} /> Sign out all other devices</button>
+    </section>
+  </div>
+</div>

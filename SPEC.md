@@ -1,0 +1,517 @@
+# Homelab Notes — Spec v2
+
+Self-hosted, private, multi-user **plain-text** notes web app for a homelab. Each user's notes are
+private. Content lives as files under `data/`; SQLite holds metadata. Runs via Docker Compose.
+
+v2 incorporates round-1 review from team beta — see `REVIEWS.md`.
+
+**Owner decisions (round 1):** keep resumable (tus) uploads · free-space guard default 1 GiB ·
+listen on **all interfaces, port 4444** by default.
+
+## 1. Requirements (owner — fixed)
+
+1. Web app, self-hosted in a homelab.
+2. Notes are **plain text** (not Markdown, not rich text).
+3. **SQLite** database tracks metadata.
+4. Note text, images and files are saved as files under **`data/`**.
+5. UI: modern, fresh, elegant, minimal — and **colorful**.
+6. Notes can have **tags**.
+7. **Paste screenshots** into notes.
+8. **Attach any kind of file**, **no size limit**.
+9. Users are **added via the command line** only.
+10. Notes are **private per user**. No sharing, no co-editing.
+11. Deployed with **Docker Compose**.
+
+## 2. Architecture
+
+```
+Browser — Svelte 5 SPA + CodeMirror 6
+   │  HTTP :4444 on all interfaces (optional reverse proxy for TLS)
+   ▼
+Go binary  `notes`
+   ├── serve      embedded SPA, JSON API, tus upload endpoint, janitor
+   ├── CLI        user … | backup | export | import | reindex | doctor | gc | healthcheck
+   ├── SQLite     data/db/notes.sqlite   metadata (authoritative for metadata)
+   ├── SQLite     data/db/search.sqlite  full-text index (derived, disposable)
+   └── Files      data/users/<uid>/…     note bodies + attachment bytes (authoritative for content)
+```
+
+| Layer | Choice | Notes |
+|---|---|---|
+| Backend + CLI | Go 1.27 (pinned), one static binary | Same binary is server and CLI |
+| HTTP | stdlib `net/http` + Go 1.22 routing | No framework |
+| DB driver | `modernc.org/sqlite` (pinned) | Pure Go, no CGO. **Build-time check:** FTS5 + `trigram` tokenizer present. Fallback: `mattn/go-sqlite3` behind `database/sql`. |
+| Migrations | Embedded SQL, `schema_version` table, applied at startup | |
+| Uploads | **Hand-rolled minimal tus 1.0** (core + creation + creation-with-upload + termination) | Not `tusd`. ~300 lines. |
+| Passwords | Argon2id, PHC string (m=64 MiB, t=3, p=1) | Params stored per hash so they can change |
+| Frontend | **Svelte 5 + Vite** SPA, TypeScript, tiny router (~4 routes) | No SvelteKit — no SSR needed |
+| Editor | CodeMirror 6, block widget decorations | |
+| Styling | Hand-written CSS, design tokens (OKLCH) first | No UI kit; self-hosted fonts, no CDN |
+| Container | Alpine, multi-stage, multi-arch (amd64 + arm64) | Runs as `PUID:PGID` via entrypoint + `su-exec` |
+
+**Single instance only.** One server process per `data/`. `data/` must be on a **local filesystem**
+(not NFS/SMB — breaks SQLite locking and rename atomicity).
+
+## 3. Data layout & source of truth
+
+### 3.1 Layout
+
+```
+data/
+├── db/
+│   ├── notes.sqlite            # metadata (+ -wal, -shm)
+│   └── search.sqlite           # FTS index — delete anytime, `notes reindex` rebuilds
+├── tmp/
+│   └── <uid>/<upload-id>       # in-progress uploads, per user, GC after 24 h
+├── backups/                    # default target of `notes backup`
+├── lost+found/                 # where `doctor --fix` quarantines orphans
+└── users/
+    └── <user-uuid>/
+        ├── notes/
+        │   ├── <note-uuid>.txt       # body — UTF-8, LF line endings
+        │   └── <note-uuid>.txt.bak   # previous version (one generation)
+        └── files/
+            └── <attachment-uuid>     # raw bytes
+```
+
+- IDs: UUIDv7. No path is ever built from user input.
+- Permissions: dirs `0700`, files `0600`, owned by the container UID.
+- `tmp/` and `users/` are on the same filesystem (required for atomic rename; checked at startup).
+
+### 3.2 What is authoritative
+
+| Data | Authority | If lost |
+|---|---|---|
+| Note body | `.txt` file | Gone (restore from backup) |
+| Attachment bytes | `files/<id>` | Gone |
+| Title, size, sha256 of a note | Derived from the `.txt` | Recomputed on startup reconcile |
+| Users, sessions, tags, tag colors, note↔tag, pinned, trash state, attachment filename/mime/ownership | **`notes.sqlite`** | **Not rebuildable** — back up the DB |
+| Search index | Derived | `notes reindex` |
+
+## 4. Database schema
+
+### 4.1 Connection setup (every connection)
+
+`PRAGMA foreign_keys=ON; journal_mode=WAL; synchronous=NORMAL; busy_timeout=5000;`
+One writer connection (serialized by a mutex) + a small read pool.
+
+### 4.2 `notes.sqlite`
+
+Timestamps are integer unix milliseconds, UTC.
+
+```sql
+CREATE TABLE users(
+  id TEXT PRIMARY KEY,
+  username TEXT NOT NULL UNIQUE,            -- ^[a-z][a-z0-9_-]{0,31}$
+  password_hash TEXT NOT NULL,              -- Argon2id PHC string
+  disabled INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+
+CREATE TABLE sessions(
+  token_hash BLOB PRIMARY KEY,              -- SHA-256 of 256-bit random token
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,            -- updated at most once per hour
+  expires_at INTEGER NOT NULL,              -- idle expiry
+  absolute_expires_at INTEGER NOT NULL,     -- hard cap
+  user_agent TEXT);                         -- display only
+CREATE INDEX sessions_user ON sessions(user_id);
+CREATE INDEX sessions_exp  ON sessions(expires_at);
+
+CREATE TABLE notes(
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,                      -- derived (§5.4)
+  pinned INTEGER NOT NULL DEFAULT 0,
+  trashed_at INTEGER,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  size_bytes INTEGER NOT NULL,              -- derived
+  content_sha256 TEXT NOT NULL,             -- derived; cache of the file's hash
+  UNIQUE(id, user_id));
+CREATE INDEX notes_list ON notes(user_id, trashed_at, pinned, updated_at);
+
+CREATE TABLE tags(
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL COLLATE NOCASE,        -- trimmed, NFC, 1–40 chars, no commas
+  color TEXT NOT NULL,                      -- palette key, e.g. "coral"
+  UNIQUE(user_id, name), UNIQUE(id, user_id));
+
+CREATE TABLE note_tags(
+  note_id TEXT NOT NULL, tag_id TEXT NOT NULL, user_id TEXT NOT NULL,
+  PRIMARY KEY(note_id, tag_id),
+  FOREIGN KEY(note_id, user_id) REFERENCES notes(id, user_id) ON DELETE CASCADE,
+  FOREIGN KEY(tag_id, user_id)  REFERENCES tags(id, user_id)  ON DELETE CASCADE);
+CREATE INDEX note_tags_tag ON note_tags(tag_id);
+
+CREATE TABLE attachments(
+  id TEXT PRIMARY KEY,                      -- client-generated UUIDv7, validated
+  ref TEXT NOT NULL,                        -- 10-char base32 marker id (§6)
+  user_id TEXT NOT NULL,
+  note_id TEXT NOT NULL,
+  filename TEXT NOT NULL,                   -- original name, display only
+  mime TEXT NOT NULL,                       -- server-sniffed
+  size_bytes INTEGER NOT NULL,
+  sha256 TEXT,                              -- integrity, computed on finalize
+  state TEXT NOT NULL,                      -- 'uploading' | 'ready' | 'deleting'
+  created_at INTEGER NOT NULL,
+  UNIQUE(user_id, ref),
+  FOREIGN KEY(note_id, user_id) REFERENCES notes(id, user_id) ON DELETE CASCADE);
+CREATE INDEX attachments_note ON attachments(note_id);
+
+CREATE TABLE audit_log(
+  id INTEGER PRIMARY KEY, at INTEGER NOT NULL, actor TEXT NOT NULL,  -- 'cli' | user id
+  event TEXT NOT NULL, detail TEXT);        -- login ok/fail, user add/rm/passwd, purge
+```
+
+Composite FKs enforce that a note's tags and attachments always belong to the same user.
+Every API query additionally filters `WHERE user_id = :session_user`.
+
+### 4.3 `search.sqlite` (derived, disposable)
+
+```sql
+CREATE VIRTUAL TABLE notes_fts USING fts5(
+  title, body,
+  note_id UNINDEXED, user_id UNINDEXED,
+  tokenize = 'trigram');                    -- substring search: IPs, paths, hostnames
+CREATE TABLE indexed(note_id TEXT PRIMARY KEY, content_sha256 TEXT NOT NULL);
+```
+
+- Body is indexed with marker lines stripped.
+- Queries: user input is escaped into a quoted FTS5 phrase (never raw `MATCH`). Queries < 3 chars
+  fall back to title `LIKE` in `notes.sqlite`. Invalid query → empty result, not 500.
+- Results always re-filtered against `notes.sqlite` (owner + not trashed) before returning.
+- Index failures never fail a save; they are logged and repaired by reconcile.
+
+## 5. Note save protocol
+
+### 5.1 Server (`PUT /api/notes/{id}/body` with `{body, base_sha256}`)
+
+1. Validate: valid UTF-8, no NUL, ≤ 10 MiB; normalize CRLF → LF.
+2. Acquire the **per-note lock** (in-process mutex keyed by note id).
+3. Hash the **current file on disk**. If ≠ `base_sha256` → release, return **409** with
+   `{current_body, current_sha256}`.
+4. Copy current file to `<id>.txt.bak` (one generation).
+5. Write `<id>.<random>.tmp` in the same `notes/` dir → fsync → rename to `<id>.txt` → fsync dir.
+6. `BEGIN IMMEDIATE` → update `title, size_bytes, content_sha256, updated_at` → `COMMIT`.
+7. Release lock. Respond `200 {sha256, updated_at, title}`.
+8. Update `search.sqlite` (best effort, async).
+
+### 5.2 Crash recovery (startup reconcile, also `notes doctor`)
+
+For each note row: if file hash ≠ `content_sha256` → **file wins**, recompute derived fields.
+For each `indexed` row: if sha ≠ note's sha → re-index. Remove stray `*.tmp` files.
+Runs at startup, takes seconds at homelab scale.
+
+### 5.3 Client
+
+- Debounced autosave (800 ms idle) + on blur / `visibilitychange` / `beforeunload`.
+- **One save in flight per note**; each save's `base_sha256` = previous response's `sha256`.
+- Every keystroke batch is also written to **IndexedDB drafts**; cleared on successful save.
+  On load, a draft newer than the server version offers "restore draft".
+- On **409**: autosave pauses. Inline bar shows a diff of mine vs. server with
+  **Keep mine** (overwrite using the new base), **Use theirs**, **Save mine as a new note**.
+  Nothing is discarded silently (and `.bak` exists).
+
+### 5.4 Title derivation
+
+First non-empty line that is **not** a marker line, trimmed, truncated to 120 chars on a
+grapheme boundary. Empty → `Untitled`.
+
+## 6. Plain text + inline screenshots
+
+### 6.1 Marker grammar
+
+A marker is an **entire line** matching:
+
+```
+^\[image:([a-z2-7]{10})\](?: (.*))?$
+```
+
+```
+Server rack wiring today:
+[image:k7m2q9xh4t] rack-2026-10-21.png
+Need to relabel port 12.
+```
+
+- `ref` = 10 chars of random base32 (50 bits), unique per user (DB constraint). Generated
+  client-side together with the attachment UUID; server rejects collisions (client retries).
+- The caption after `]` is cosmetic; resolution is **by `ref` only**, scoped to the session user
+  (copying a marker into another of your notes works).
+- Anything not matching exactly (e.g. leading spaces) is ordinary text. No escaping needed.
+- Only `[image:…]` markers exist. Non-image files live in the attachment panel only.
+
+### 6.2 Editor behavior (CodeMirror 6)
+
+- Marker line → `Decoration.replace({block: true})` widget showing the image (max-width capped,
+  rounded, caption on hover, click → lightbox). `atomicRanges` so the cursor skips it;
+  Backspace/Delete removes the whole line.
+- Unresolvable ref → muted dashed placeholder "image not found".
+- Paste/drop image flow: client generates `id` + `ref` → inserts marker immediately with an
+  inline progress placeholder → uploads → placeholder becomes the image. Typing never blocks.
+- Removing a marker doesn't delete the attachment; the panel flags it as "not shown in note".
+
+## 7. Uploads & attachments
+
+### 7.1 Protocol
+
+Hand-rolled tus 1.0 at `/api/uploads/`: `POST` (creation, `Upload-Length` or
+`Upload-Defer-Length`, `Upload-Metadata: id, ref, note_id, filename`), `HEAD`, `PATCH`,
+`DELETE` (termination). `creation-with-upload` makes small pastes a single request.
+Client chunk size 8 MiB (fits behind Cloudflare tunnels / default proxies).
+
+### 7.2 Ownership
+
+- Creation requires a session + CSRF checks; validates `note_id` belongs to the user and isn't
+  trashed; validates `id` (UUIDv7) and `ref` uniqueness.
+- Inserts `attachments` row with `state='uploading'`. Temp bytes at `data/tmp/<uid>/<id>`.
+- Every `HEAD`/`PATCH`/`DELETE` re-checks `attachments.user_id = session user`. Foreign → 404.
+
+### 7.3 Finalize (on last byte, before responding)
+
+fsync temp file → sniff mime from magic bytes → rename into `users/<uid>/files/<id>` →
+fsync dir → `UPDATE … SET state='ready', mime WHERE state='uploading'`.
+The client sees success only after the row is `ready`. Idempotent if retried: if the rename
+landed but the row update didn't, `HEAD` (or an empty `PATCH` at the full offset) completes it.
+**sha256 is computed asynchronously** after `ready` (and backfilled by the janitor), so a
+multi-GB upload doesn't stall the final response behind a full re-read of the file; it is an
+integrity record, not part of the upload handshake.
+
+### 7.4 Serving `GET /api/attachments/{id}`
+
+- Authorized by `user_id`; foreign or missing → identical 404.
+- `http.ServeContent` → **Range support** (resumable downloads, video seeking).
+- **Inline only** if sniffed type ∈ {png, jpeg, gif, webp}. Everything else (incl. SVG, HTML,
+  XML, PDF, text) → `Content-Disposition: attachment`.
+- All responses: `X-Content-Type-Options: nosniff`,
+  `Content-Security-Policy: sandbox; default-src 'none'`, RFC 5987 `filename*` with
+  CR/LF/quotes/path separators stripped.
+- No in-app PDF or text/code viewer in v1.
+
+### 7.5 "No size limit" — protecting the disk
+
+No per-file or per-user cap. Uploads are streamed (bounded memory). New uploads (and PATCHes)
+are refused with **507** when free space on `data/` < `NOTES_MIN_FREE` (default 1 GiB, `0`
+disables). Free space and per-user usage shown in the UI and `/healthz`-adjacent CLI output.
+
+### 7.6 Lifecycle
+
+- Delete one attachment: `state='deleting'` → unlink file → delete row (idempotent; janitor retries).
+- Trash note: attachments stay with the note; restore brings them back.
+- Purge note: in one tx mark note + attachments deleting → unlink files → delete rows.
+- Uploads in `state='uploading'` older than 24 h: janitor deletes temp file + row.
+
+## 8. Users, auth & security
+
+### 8.1 CLI (same binary)
+
+```
+docker compose exec -it notes notes user add <name>          # password via TTY, echo off
+docker compose exec -T  notes notes user add <name> --password-stdin
+docker compose exec -it notes notes user passwd <name>       # revokes all sessions
+docker compose exec    notes notes user list                 # name, created, notes, storage
+docker compose exec    notes notes user disable|enable <name>
+docker compose exec -it notes notes user rm <name> [--purge-data]   # revokes sessions;
+                                                             # purge requires retyping name
+```
+Passwords: min 10 chars, never accepted in argv. All CLI user ops go to `audit_log`.
+
+### 8.2 Sessions
+
+- 256-bit random token in cookie; DB stores SHA-256 only.
+- Cookie: `HttpOnly; SameSite=Lax; Path=/`; when secure: `Secure` + `__Host-` prefix.
+- Rotated on login. Idle expiry 7 days (sliding), **absolute** 30 days.
+- Revoked on `passwd`, `user rm`, `user disable`, in-app password change, "log out other sessions".
+- Janitor sweeps expired sessions.
+
+### 8.3 Login
+
+- Same generic error for bad user / bad password; **dummy Argon2 verify** for unknown users.
+- Rate limit: per-username exponential backoff (no hard lockout) + per-client-IP limit.
+- Argon2 verifies capped at `max(1, NumCPU/2)` concurrent; excess → 429.
+- Limiter is in-memory (resets on restart — acceptable for v1).
+
+### 8.4 Reverse proxy trust
+
+`NOTES_TRUSTED_PROXIES` (CIDR list, default empty). Only requests from these honor
+`X-Forwarded-For` / `X-Forwarded-Proto`. `NOTES_SECURE_COOKIES=auto|true|false` (default `auto`:
+secure when the request arrived over TLS or via trusted proxy with `proto=https`).
+
+### 8.5 Request hardening
+
+- CSRF: `SameSite=Lax` + **`Origin` / `Sec-Fetch-Site` same-origin check** on every mutating
+  route (incl. login, logout, all tus methods) + `X-Requested-With` header. No CORS headers, ever.
+  No GET mutates.
+- `ReadHeaderTimeout` 10 s, `MaxHeaderBytes` 64 KiB, `http.MaxBytesReader` on JSON routes
+  (1 MiB; note body route 10 MiB). No global `WriteTimeout`; upload/download routes use
+  per-request deadlines via `http.ResponseController`.
+- Headers (SPA): `Content-Security-Policy: default-src 'self'; script-src 'self';
+  style-src 'self' 'unsafe-inline'; img-src 'self' blob:; object-src 'none'; base-uri 'self';
+  frame-ancestors 'none'` (`unsafe-inline` styles required by CodeMirror),
+  `Referrer-Policy: no-referrer`, `Permissions-Policy` denying camera/mic/geo,
+  `Cross-Origin-Opener-Policy: same-origin`.
+- IDOR: every lookup scoped by `user_id`; foreign IDs → 404. Covered by tests (§13).
+- Logs: never note bodies, passwords, cookies, tokens.
+- Out of scope, stated: 2FA/TOTP, encryption at rest (use disk encryption).
+
+## 9. Ops
+
+| Command | What it does |
+|---|---|
+| `notes serve` | Server + janitor (default command) |
+| `notes backup [dest]` | `VACUUM INTO` the DB, then tar `users/` → `notes-<ts>.tar.gz` (skips `tmp/`, `*.tmp`, `search.sqlite`). Safe while running. Keeps last N (`NOTES_BACKUP_KEEP`). |
+| `notes export <user> [dest]` | Zip: `notes/<title>.txt`, `attachments/<original name>`, `manifest.json` (tags, pins, dates, refs) |
+| `notes import <user> <dir>` | Create notes from a folder of `.txt` files |
+| `notes reindex` | Rebuild `search.sqlite` from `.txt` files |
+| `notes doctor [--fix]` | Report DB↔disk mismatches, orphans, stray tmp, old user dirs. `--fix` is explicit; orphans move to `lost+found/`, never deleted. |
+| `notes gc` | Run janitor once (trash purge, upload GC, session sweep) |
+| `notes healthcheck` | Exit 0 if `/healthz` OK (for Docker) |
+
+- **Janitor** (in `serve`, hourly): purge notes trashed > `NOTES_TRASH_DAYS` (default 30, `0` = never),
+  GC stale uploads, sweep sessions, retry `deleting` rows. Every purge logged + audited.
+- `/healthz`: liveness only, no DB lock, no version/user info.
+- Restore: stop, put `data/` back (or untar backup), delete `search.sqlite`, start (reindexes).
+
+### Config (env)
+
+`NOTES_ADDR` (`:4444`), `NOTES_DATA_DIR` (`/data`), `NOTES_TRUSTED_PROXIES`, `NOTES_SECURE_COOKIES`
+(`auto`), `NOTES_TRASH_DAYS` (30), `NOTES_MIN_FREE` (1GiB), `NOTES_BACKUP_KEEP` (7),
+`PUID`/`PGID` (1000).
+
+## 10. API (JSON under `/api`, session auth)
+
+Errors: `{"error": {"code": "conflict", "message": "…"}}` with proper HTTP status.
+Lists use keyset pagination: `?limit=50&cursor=<opaque>` → `{items, next_cursor}`.
+
+```
+POST   /api/login                POST /api/logout          POST /api/logout-others
+GET    /api/me                   PUT  /api/me/password     GET  /api/me/storage
+GET    /api/notes?q=&tag=&untagged=&pinned=&trash=&has_attachments=&sort=&limit=&cursor=
+         (q present → FTS results with escaped highlight snippets)
+POST   /api/notes                          → {id, sha256}  (empty body)
+GET    /api/notes/{id}                     → meta + body + sha256 + tags + attachments
+PUT    /api/notes/{id}/body                {body, base_sha256} → 200 | 409
+PATCH  /api/notes/{id}                     {pinned?, tag_ids?, trashed?}
+POST   /api/notes/{id}/duplicate           (copies body; markers still resolve — same user)
+DELETE /api/notes/{id}                     permanent; only when trashed
+POST   /api/trash/empty
+GET    /api/tags                           → with counts
+POST   /api/tags   PATCH /api/tags/{id}   DELETE /api/tags/{id}
+POST|HEAD|PATCH|DELETE /api/uploads/…     tus
+GET    /api/attachments/{id}               download/inline (§7.4)
+PATCH  /api/attachments/{id}               {filename}
+DELETE /api/attachments/{id}
+GET    /api/export                         zip of the current user's data
+GET    /healthz
+```
+
+Contract frozen as shared TypeScript types + Go structs **before** parallel implementation.
+
+## 11. Features (v1)
+
+**Notes** — create · edit · autosave with status dot · IndexedDB drafts · conflict diff bar ·
+title from first line · pin · duplicate · trash / restore / permanent delete / empty trash ·
+"purges in N days" chip · undo toast after trash · sort (updated, created, title) ·
+word & char count · insert timestamp shortcut.
+
+**Tags** — many per note · inline create with autocomplete · color auto-assigned by hashing
+the name into a 12-color palette, user-changeable · rename / recolor / delete · sidebar with
+counts · click to filter, multi-select = AND · "Untagged" filter.
+
+**Search** — Ctrl+K palette (note titles, tags, actions: new note, toggle theme, trash, sidebar,
+log out) · full-text substring search with highlighted snippets · filters combine
+(tags, pinned, has attachments, trash) · also matches attachment filenames.
+
+**Screenshots & attachments** — paste / drag-drop images → inline · attach any file, any size,
+resumable · upload tray (progress, cancel, retry) · attachment panel (type-colored icon, name,
+size, rename, download, delete, "not shown in note" flag) · image lightbox (←/→ through a
+note's images, zoom-to-fit) · range downloads.
+
+**Account** — login · change password · log out other sessions · storage used + disk free.
+
+**Data** — export zip (UI + CLI) · import folder (CLI) · backup (CLI) · reindex · doctor.
+
+## 12. UI / visual design
+
+- **Layout:** sidebar 240 px · note list 320 px (resizable) · editor fluid. Focus mode
+  (Ctrl+Shift+F) hides both side panes. Mobile: list → editor push navigation with back
+  button, tags as a horizontal chip scroller, attachments as a bottom sheet, floating
+  new-note button, PWA manifest (installable, no offline).
+- **Surfaces:** tinted neutrals, never pure black/white (light canvas ≈ `#f6f3eb`, ink `#1c2430`;
+  dark canvas ≈ `#16141f`). Trash view desaturates the whole surface.
+- **Color system:** 12 tag hues defined once in OKLCH with matched lightness; each has
+  light/dark chip bg (`color-mix` ~16%) + text pair verified ≥ 4.5:1. Hue drives chip,
+  note-card 3 px accent stripe, sidebar dot. One brand gradient: logo, primary button,
+  empty states, login mesh. Everything else flat.
+- **Type:** self-hosted Inter (UI) · editor proportional 16–17 px / 1.65, ~68 ch measure,
+  no gutter, soft wrap; mono toggle (JetBrains Mono). First line styled as a large title.
+- **Note list:** cards — title, one preview line (marker lines skipped), relative time,
+  tag dots, pin/attachment icons; hover reveals actions without layout shift; skeleton
+  loading; virtualized.
+- **Editor chrome:** none while typing. Save status = 6 px dot (amber saving, green saved,
+  red error) + tooltip; never a toast for autosave. Drop overlay with gradient dashed border.
+- **Motion:** 120–160 ms, transform/opacity only, honors `prefers-reduced-motion`.
+- **Empty states:** soft gradient orb + one line + shortcut hint. First login seeds a
+  "Welcome" note explaining shortcuts and image paste.
+- **Login:** single card on a gradient mesh, no sign-up link; if no users exist, shows the
+  `notes user add` command.
+- **Keyboard:** Ctrl+K palette, Alt+N new (browsers reserve Ctrl+N), Ctrl+S save now,
+  Ctrl+\ hide/show sidebar, Ctrl+Shift+F focus mode, `/` search, `?` cheat sheet (outside
+  text fields). `c` (new note) and `j`/`k`/Enter only while the note list has focus.
+- **Accessibility:** visible focus rings, WCAG AA contrast, state never by color alone,
+  `aria-live` save status, 40 px touch targets, 16 px inputs (no iOS zoom).
+
+## 13. Testing
+
+- Go: `t.TempDir()` fixtures; save protocol incl. 409 race (concurrent saves), crash between
+  rename and commit → reconcile; purge ordering; upload resume / cancel / finalize / GC;
+  **cross-user IDOR suite** (user B gets 404 for every user A id on every route); FTS escaping;
+  marker parsing; CSRF/Origin checks.
+- Frontend: Vitest for marker parser, save queue, draft recovery.
+- E2E (Playwright, against `docker compose up`): login → create → type → paste image →
+  reload → image renders → tag → search finds it → upload 2 GB file with simulated drop +
+  resume → export zip.
+
+## 14. Docker Compose
+
+```yaml
+services:
+  notes:
+    build: .
+    image: homelab-notes:latest
+    ports: ["4444:4444"]                # all interfaces (owner decision)
+    volumes: ["./data:/data"]
+    environment:
+      PUID: 1000
+      PGID: 1000
+      NOTES_TRUSTED_PROXIES: ""
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]  # entrypoint fixes ownership, su-exec drops to PUID
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "notes", "healthcheck"]
+      interval: 30s
+```
+
+Shipped with `docs/reverse-proxy.md`: Caddy + nginx examples (`client_max_body_size 0`,
+`proxy_request_buffering off`, long timeouts, trusted proxy setting, HSTS).
+
+## 15. Out of scope (v1)
+
+Sharing, co-editing, version history (beyond one `.bak`), Markdown, in-app PDF/text viewers,
+mobile apps, OAuth/SSO/2FA, encryption at rest, admin web UI, API tokens / quick-capture
+(`notes push`, v1.1), per-user quotas, multiple server instances.
+
+## 16. Build plan
+
+1. **Alpha:** scaffold repo, migrations, frozen API contract (Go + TS types), Dockerfile/compose,
+   design tokens.
+2. **Beta (parallel, one owner each):** (a) notes API + save protocol + reconcile · (b) auth,
+   sessions, CLI user mgmt, security middleware · (c) tus uploads + attachment serving + janitor ·
+   (d) search index + backup/export/import/doctor · (e) frontend shell, layout, theme, tags,
+   list, palette · (f) editor: CodeMirror, markers, paste flow, drafts, conflict bar.
+3. **Alpha:** integrate, `docker compose up`, run E2E.
+4. **Beta:** cross-review each piece by a different model.
