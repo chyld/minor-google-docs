@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { api } from './lib/api';
   import { app } from './lib/state.svelte';
   import Login from './components/Login.svelte';
@@ -85,13 +85,12 @@
     } else if (mod && e.shiftKey && k === 'f') {
       e.preventDefault();
       app.focusMode = !app.focusMode;
-    } else if (mod && e.key === '\\') {
+    } else if (mod && (e.code === 'Backslash' || e.key === '\\')) {
+      // by physical key, or by the character where \ needs AltGr (which reports as Ctrl+Alt)
       e.preventDefault();
-      if (matchMedia('(max-width: 860px)').matches) app.sidebarOpen = !app.sidebarOpen;
-      else {
-        app.sidebarHidden = !app.sidebarHidden;
-        localStorage.setItem('notes.sidebarHidden', app.sidebarHidden ? '1' : '0');
-      }
+      if (!app.desktop) app.sidebarOpen = !app.sidebarOpen;
+      else if (e.shiftKey) app.setListCollapsed(!app.listCollapsed);
+      else app.setSidebarCollapsed(!app.sidebarCollapsed);
     } else if (mod && k === 's' && !e.defaultPrevented) {
       e.preventDefault(); // never the browser's "save page"; the open note saves now
       window.dispatchEvent(new CustomEvent('notes:save'));
@@ -101,7 +100,8 @@
       if (e.key === '/') {
         e.preventDefault();
         app.focusMode = false;
-        list?.focusSearch();
+        if (app.listCollapsed && app.desktop) app.setListCollapsed(false);
+        tick().then(() => list?.focusSearch());
       } else if (e.key === '?') {
         e.preventDefault();
         app.shortcutsOpen = true;
@@ -130,7 +130,7 @@
 {:else if !app.me}
   <Login />
 {:else}
-  <div class="shell" class:focus={app.focusMode} class:no-sidebar={app.sidebarHidden} data-pane={app.mobilePane} style="--list-w:{listWidth}px">
+  <div class="shell" class:focus={app.focusMode} class:rail={app.sidebarCollapsed} class:no-list={app.listCollapsed} data-pane={app.mobilePane} data-width={app.width} style="--list-w:{listWidth}px">
     <Sidebar />
     <NoteList bind:this={list} />
     <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -143,7 +143,12 @@
           <div class="orb"></div>
           <h2>Pick a note, or start a fresh one</h2>
           <p class="muted">Everything is plain text, saved as you type.</p>
-          <button class="btn primary" onclick={() => app.newNote()}><Icon name="plus" size={16} /> New note</button>
+          <div class="row">
+            <button class="btn primary" onclick={() => app.newNote()}><Icon name="plus" size={16} /> New note</button>
+            {#if app.listCollapsed && app.desktop}
+              <button class="btn" onclick={() => app.setListCollapsed(false)}><Icon name="list" size={16} /> Show notes list</button>
+            {/if}
+          </div>
           <p class="muted small hints"><kbd>Ctrl</kbd> <kbd>K</kbd> jump anywhere · <kbd>?</kbd> shortcuts</p>
         </div>
       {/if}

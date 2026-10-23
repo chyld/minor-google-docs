@@ -87,7 +87,8 @@ export function menu(node: HTMLElement, opts: { onclose: () => void }) {
   let onclose = opts.onclose;
   const trigger = document.activeElement as HTMLElement | null;
   const items = () => [...node.querySelectorAll<HTMLElement>('[role^="menuitem"]:not([disabled])')];
-  queueMicrotask(() => (node.querySelector<HTMLElement>('[aria-checked="true"]') ?? items()[0] ?? node)?.focus());
+  // a menu that is mostly a choice opens on the current choice; [data-first] overrides that
+  queueMicrotask(() => (node.querySelector<HTMLElement>('[data-first]') ?? node.querySelector<HTMLElement>('[aria-checked="true"]') ?? items()[0] ?? node)?.focus());
   const close = (refocus: boolean) => {
     onclose();
     if (refocus && trigger && document.contains(trigger)) trigger.focus();

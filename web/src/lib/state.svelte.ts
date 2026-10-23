@@ -1,5 +1,6 @@
 import { api, ApiError, setUnauthorizedHandler } from './api';
 import type { NoteMeta, Sort, Tag, User } from './types';
+import { effectiveWidth, loadLayout, saveLayout, type PageWidth } from './layout';
 
 export type View = 'all' | 'pinned' | 'untagged' | 'attachments' | 'trash';
 export type Theme = 'system' | 'light' | 'dark';
@@ -35,7 +36,13 @@ class AppState {
   mono = $state(localStorage.getItem('notes.mono') === '1');
   focusMode = $state(false);
   sidebarOpen = $state(false); // mobile drawer
-  sidebarHidden = $state(localStorage.getItem('notes.sidebarHidden') === '1'); // desktop collapse
+  // desktop layout (ignored on phones, where one pane shows at a time)
+  sidebarCollapsed = $state(false); // icon rail
+  listCollapsed = $state(false);
+  pageWidth = $state<PageWidth>('auto');
+  desktop = $state(true);
+  /** The writing column's width right now (focus mode counts as "list hidden"). */
+  width = $derived(effectiveWidth(this.pageWidth, (this.listCollapsed && this.desktop) || this.focusMode));
   mobilePane = $state<'list' | 'note'>('list');
 
   paletteOpen = $state(false);
@@ -48,6 +55,10 @@ class AppState {
   private listSeq = 0;
 
   constructor() {
+    Object.assign(this, loadLayout(localStorage));
+    const mq = matchMedia('(min-width: 861px)');
+    this.desktop = mq.matches;
+    mq.addEventListener('change', () => (this.desktop = mq.matches));
     setUnauthorizedHandler(() => {
       if (this.me) {
         this.me = null;
@@ -82,6 +93,25 @@ class AppState {
     localStorage.setItem('notes.mono', v ? '1' : '0');
   }
 
+  private saveLayout() {
+    saveLayout(localStorage, { sidebarCollapsed: this.sidebarCollapsed, listCollapsed: this.listCollapsed, pageWidth: this.pageWidth });
+  }
+
+  setSidebarCollapsed(v: boolean) {
+    this.sidebarCollapsed = v;
+    this.saveLayout();
+  }
+
+  setListCollapsed(v: boolean) {
+    this.listCollapsed = v;
+    this.saveLayout();
+  }
+
+  setPageWidth(w: PageWidth) {
+    this.pageWidth = w;
+    this.saveLayout();
+  }
+
   setSort(s: Sort) {
     this.sort = s;
     localStorage.setItem('notes.sort', s);
@@ -92,6 +122,7 @@ class AppState {
     this.view = v;
     this.tagFilter = [];
     this.sidebarOpen = false;
+    if (this.listCollapsed && this.desktop) this.setListCollapsed(false); // phones keep the desktop setting
     this.loadList();
   }
 
@@ -103,6 +134,7 @@ class AppState {
       this.tagFilter = this.tagFilter.length === 1 && this.tagFilter[0] === id ? [] : [id];
     }
     this.sidebarOpen = false;
+    if (this.listCollapsed && this.desktop) this.setListCollapsed(false); // phones keep the desktop setting
     this.loadList();
   }
 

@@ -435,9 +435,9 @@ note's images, zoom-to-fit) · range downloads.
 
 ## 12. UI / visual design
 
-- **Layout:** sidebar 248 px (220 px on narrow screens; Ctrl+\ hides it) · note list 340 px
-  (drag to resize, 260–560 px, remembered) · editor fluid. Focus mode
-  (Ctrl+Shift+F) hides both side panes. Mobile: list → editor push navigation with back
+- **Layout:** sidebar 248 px (220 px on narrow screens; collapses to a 60 px icon rail) · note list
+  340 px (drag to resize, 260–560 px, remembered; can be hidden) · editor fluid. Focus mode
+  (Ctrl+Shift+F) hides both side panes. See §18. Mobile: list → editor push navigation with back
   button, tags as a horizontal chip scroller, attachments as a bottom sheet, floating
   new-note button, PWA manifest (installable, no offline).
 - **Surfaces:** tinted neutrals, never pure black/white (light canvas ≈ `#f6f3eb`, ink `#1c2430`;
@@ -462,7 +462,7 @@ note's images, zoom-to-fit) · range downloads.
 - **Login:** single card on a gradient mesh, no sign-up link; if no users exist, shows the
   `notes user add` command.
 - **Keyboard:** Ctrl+K palette, Alt+N new (browsers reserve Ctrl+N), Ctrl+S save now,
-  Ctrl+\ hide/show sidebar, Ctrl+Shift+F focus mode, `/` search, `?` cheat sheet (outside
+  Ctrl+\ sidebar rail, Ctrl+Shift+\ notes list, Ctrl+Shift+F focus mode, Ctrl+Shift+H highlight, `/` search, `?` cheat sheet (outside
   text fields). `c` (new note) and `j`/`k`/Enter only while the note list has focus.
 - **Accessibility:** visible focus rings, WCAG AA contrast, state never by color alone,
   `aria-live` save status, 40 px touch targets, 16 px inputs (no iOS zoom).
@@ -588,3 +588,86 @@ are not repaired automatically. Mobile is verified in desktop Chromium only.
 
 **17.8 Tests.** `web/src/lib/editor/images.test.ts` (state-level rules). `web/e2e/images.mjs` drives a
 real browser against a running server (`PW=<playwright> BASE=… USER_NAME=… PASS=… node web/e2e/images.mjs`).
+
+## 18. Collapsible panels and page width
+
+Desktop only (≥ 861 px); phones keep one pane at a time and ignore these settings. State lives in
+`app` (`web/src/lib/state.svelte.ts`), persisted by `web/src/lib/layout.ts` (`notes.sidebarCollapsed`,
+`notes.listCollapsed`, `notes.pageWidth`; the old `notes.sidebarHidden` migrates to the rail once).
+
+- **Sidebar → icon rail (60 px).** Toggle in the sidebar header or Ctrl+\ (matched by physical key).
+  The rail keeps New note, Jump to (Ctrl+K), the five views, the account menu and the theme toggle, all
+  with tooltips; tags are tucked away. An active tag filter shows as a tag icon with the tag's dot
+  (clicking it expands the sidebar), so a filter is never invisible.
+- **Notes list → hidden (0 px).** Toggle in the list header, Ctrl+Shift+\, or the "Show notes list"
+  button that replaces it in the note bar (and on the empty screen). Hidden panes are `inert` and
+  `visibility:hidden`; the grid keeps its columns so the resizer stays in place. Picking a view or a tag,
+  or `/` (search), brings the list back; Ctrl+K jumping leaves it hidden. Its width is remembered.
+- Picking a view on a phone never changes the desktop list setting. Ctrl+\ also matches the `\`
+  character, so layouts that type it with AltGr work.
+- **Page width** (note ⋯ menu, Ctrl+K): Auto (default: 760 px, or 1100 px while the list is hidden or in
+  focus mode) · Normal 760 px · Wide 1100 px · Full (up to 1600 px). Shown as `data-width` on `.shell`.
+- **Focus mode** hides both panes without touching these settings; Esc restores exactly what was there.
+- Panels snap (no animation), so text rewraps once; CodeMirror re-measures on resize.
+
+Tests: `web/src/lib/layout.test.ts`, `web/e2e/panels.mjs`.
+
+## 19. Text highlights
+
+Stored in the note text, so they survive export/backup/conflicts and can't drift:
+`=={name}highlighted words==`. Grammar (single line, one definition in `web/src/lib/highlight.ts` and
+`internal/core/highlight.go`, both tested against `internal/core/testdata/highlights.json`):
+`==\{(<name>)\}([^\n]+?)==` with names longest-first. 24 names: the 12 tag hues (`coral` … `pink`),
+each plain (light tint) and `-deep` (strong). Unknown names, `a == b`, unterminated or multi-line text
+stay plain. Image lines are never highlights. No escapes. The TS parser is hand-written and linear
+(a lazy regex rescans the line for every unclosed opener); Go's RE2 is linear too. No length cap.
+
+- **Writing.** A highlight's text never contains `==` (it would end early), never ends with `=` and is
+  never only whitespace; when applying, those characters simply stay uncoloured. So for any apply/remove,
+  the text without delimiters is unchanged (property-tested). Every written line is re-parsed and must
+  read back as exactly the intended text and colours (a stray, unclosed `=={coral}` earlier on the line
+  would otherwise be completed by the new `==`); if not, that line is left alone. Emoji are never split.
+- **Drawing** (`web/src/lib/editor/highlights.ts`). An index of all highlights (`StateField`, changed
+  lines rescanned) drives viewport decorations: coloured text, delimiters hidden as atomic inline
+  replaces. When the selection touches a highlight its delimiters show dimmed (not atomic), so it is
+  always visible whether typing lands inside (before the closing `==`) or outside. Nothing reveals or
+  hides while the mouse button is down. The cursor never rests inside a delimiter. Next to an image,
+  the text edge of a highlight that opens/closes the line counts as the line edge (Backspace/arrows
+  reach the image as on any line).
+- **Edits keep them well-formed** (`transactionFilter`, user edits): an edit crossing a delimiter skips
+  it; Backspace/Delete on a delimiter removes the highlight but keeps its text; typing over part of a
+  delimiter is refused. A highlight whose text no longer parses the same is rewritten: a line break
+  inside (Enter, paste) closes and reopens it on each line, `==` typed inside splits it, and one left
+  with no text (or only spaces) loses its delimiters; `=` typed at the very end goes after the closer
+  (it could not be part of the text). The cursor ends after what was typed. Replace-all never edits
+  delimiters (`changeFilter`). Registered before the image rules, so image edits (a dropped image line)
+  are shaped first and highlights then close/reopen around them.
+- **Apply / remove** (one undo step, `input.highlight`): per text line of the main selection, trimmed to
+  its non-whitespace extent; parts of other highlights are split (outside parts keep their colour);
+  touching same-colour runs merge; idempotent. With just a cursor in a highlight's text (not merely
+  next to it): recolour/remove it.
+  Image lines, blank lines and read-only notes are skipped. Afterwards the coloured text is selected.
+- **UI.** Note-bar highlighter button (enabled with a selection or a cursor in a highlight) opens a
+  12×2 grid (6 columns on phones, pinned to the bottom); "Remove highlight" first when inside one.
+  Desktop also gets a small bar above a selection (fixed position, kept inside the note's scroll area,
+  below the selection near the top; its menu kept inside the window): last colour, colours, remove.
+  Arrow keys follow the visible columns. Ctrl+Shift+H opens the
+  grid; arrows move, Enter applies, Esc returns to the editor. The grid starts on the current or last
+  colour, so Ctrl+Shift+H, Enter repeats it. Menus keep the editor's selection (mousedown prevented).
+- **Colours.** Background tints `oklch(--hl-l --hl-c hue)` with an ink colour per theme; light and
+  strong text pairs are unit-tested at ≥ 4.5:1 for every hue in both themes. Forced-colours mode uses
+  `Mark`/`MarkText`. The swatches carry names (tooltip, `aria-label`).
+- **Clipboard.** Copy/cut/drag build their text from positions: `text/plain` without delimiters (Slack,
+  email), and in `text/x-notes-raw` the same range with balanced delimiters (a highlight cut by the
+  selection is closed/reopened at the cut). Paste and drop in this app prefer the raw text (keeping any
+  line padding the image rules added) — unless pasting into a highlight, where the plain text takes that
+  highlight's colour. The last-used colour is validated before use.
+- **Elsewhere.** Titles, previews (strip → trim → skip blank → truncate), the search index and snippets
+  (`core.SearchText`; snippet chunks end at a line break so no delimiter is cut in half) and the footer
+  counts all ignore delimiters. Export, backups and the conflict view
+  show the raw text. Ctrl+F matches raw text, so a word highlighted mid-way may not be found there
+  (server search finds it).
+
+Tests: `internal/core` (fixture, titles/previews), `web/src/lib/highlight.test.ts` (grammar, round-trip
+property, contrast), `web/src/lib/editor/highlights.test.ts` (apply/remove, edit rules, clipboard),
+`web/e2e/highlights.mjs` (browser).

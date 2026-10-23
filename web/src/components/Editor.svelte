@@ -1,11 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { EditorState, Annotation, EditorSelection, Transaction, type Line } from '@codemirror/state';
+  import { EditorState, Annotation, EditorSelection, Prec, Transaction, type Line } from '@codemirror/state';
   import { EditorView, drawSelection, keymap, placeholder } from '@codemirror/view';
   import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
   import { search, searchKeymap } from '@codemirror/search';
   import { markers } from '../lib/editor/markers';
   import { imageEditing, imageLineRange, imageOp, initialSelection, isImageLine, selectedImage, textPos } from '../lib/editor/images';
+  import { applyHighlight, highlightAt, highlights, type HighlightInfo } from '../lib/editor/highlights';
   import { stamp } from '../lib/format';
   import { MARKER_RE, markerLine } from '../lib/ids';
 
@@ -15,8 +16,11 @@
     onfiles: (files: File[], at: 'cursor' | number) => void;
     onsave: () => void;
     onblur: () => void;
+    onselection?: (info: HighlightInfo) => void;
+    onhighlightkey?: () => void;
   }
-  let { readonly = false, onchange, onfiles, onsave, onblur }: Props = $props();
+  let { readonly = false, onchange, onfiles, onsave, onblur, onselection, onhighlightkey }: Props = $props();
+  let dragging = false;
 
   let host: HTMLDivElement;
   let view: EditorView | null = null;
@@ -44,7 +48,11 @@
     return [
       history(),
       search({ top: true }),
+      Prec.highest(keymap.of([{ key: 'Mod-Shift-h', preventDefault: true, run: () => (onhighlightkey?.(), true) }])),
       markers(),
+      // highlights first: transaction filters run last-registered first, so the image rules shape an
+      // edit (e.g. a dropped image gets its own line) before highlights split around the result
+      highlights(),
       imageEditing(),
       drawSelection({ drawRangeCursor: false }),
       EditorView.lineWrapping,
@@ -69,6 +77,7 @@
         if (u.docChanged && !u.transactions.some((t) => t.annotation(external))) onchange(u.state.doc.toString());
         if (u.transactions.some((t) => t.annotation(Transaction.userEvent))) touched = true;
         if (u.docChanged && u.transactions.some((t) => t.isUserEvent('undo') || t.isUserEvent('redo'))) queueMicrotask(reapplyRetired);
+        if (u.selectionSet || u.docChanged || u.focusChanged || u.geometryChanged) report();
       }),
       EditorView.domEventHandlers({
         paste(e) {
@@ -90,6 +99,18 @@
           onblur();
           return false;
         },
+        mousedown(e) {
+          if (e.button !== 0) return false;
+          dragging = true;
+          report();
+          const up = () => {
+            window.removeEventListener('mouseup', up, true);
+            dragging = false;
+            requestAnimationFrame(report); // after the click's selection lands
+          };
+          window.addEventListener('mouseup', up, true);
+          return false;
+        },
       }),
     ];
   }
@@ -106,6 +127,33 @@
     retired.clear(); // a fresh state has no history that could bring old markers back
     const doc = EditorState.create({ doc: text }).doc;
     view.setState(EditorState.create({ doc, selection: initialSelection(doc), extensions: extensions(ro) }));
+  }
+
+  function highlightInfo(): HighlightInfo {
+    const none: HighlightInfo = { can: false, empty: true, current: null, focused: false, dragging, rect: null };
+    if (!view) return none;
+    const st = view.state;
+    const focused = view.hasFocus;
+    if (st.readOnly || selectedImage(st)) return { ...none, focused };
+    const r = st.selection.main;
+    const h = highlightAt(st);
+    const current = h && r.from >= h.from && r.to <= h.to ? h.name : null;
+    if (r.empty) return { ...none, can: !!h, current, focused };
+    const c = view.coordsAtPos(r.from, 1);
+    return { can: true, empty: false, current, focused, dragging, rect: c ? { left: c.left, top: c.top, bottom: c.bottom } : null };
+  }
+
+  /** Tell the parent about the selection again (e.g. after its scroll container moved). */
+  export function report() {
+    onselection?.(highlightInfo());
+  }
+
+  /** Colour the selection (null removes highlighting), then return to typing. */
+  export function highlight(name: string | null): boolean {
+    if (!view) return false;
+    const done = applyHighlight(view, name);
+    view.focus();
+    return done;
   }
 
   /** Replace content as an edit (undoable, triggers onchange). */

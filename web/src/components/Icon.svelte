@@ -37,6 +37,11 @@
     refresh: 'M20 12a8 8 0 1 1-2.3-5.7L20 8.5M20 4v4.5h-4.5',
     sort: 'M7 4v16M4 17l3 3 3-3M17 20V4M14 7l3-3 3 3',
     archive: 'M3 4h18v4H3zM5 8v12h14V8M10 12h4',
+    list: 'M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01',
+    collapse: 'M11 17l-5-5 5-5M18 17l-5-5 5-5',
+    expand: 'M13 17l5-5-5-5M6 17l5-5-5-5',
+    width: 'M3 12h18M7 8l-4 4 4 4M17 8l4 4-4 4',
+    highlight: 'M14 4l6 6-8.5 8.5H6v-5.5L14 4zM9 9l6 6M3 21h9',
   };
 </script>
 

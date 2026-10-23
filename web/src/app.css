@@ -56,6 +56,14 @@
   --danger: oklch(0.55 0.2 25);
   --success: oklch(0.6 0.16 150);
   --warn: oklch(0.72 0.16 70);
+
+  /* text highlights (contrast checked in highlight.test.ts) */
+  --hl-l: 0.92;
+  --hl-c: 0.075;
+  --hl-ink: #1c2430;
+  --hl-deep-l: 0.8;
+  --hl-deep-c: 0.13;
+  --hl-deep-ink: #1c2430;
 }
 
 [data-theme='dark'] {
@@ -86,6 +94,13 @@
   --accent: oklch(0.72 0.17 295);
   --accent-soft: oklch(0.72 0.17 295 / 0.16);
   --danger: oklch(0.7 0.18 25);
+
+  --hl-l: 0.4;
+  --hl-c: 0.085;
+  --hl-ink: #ece9f5;
+  --hl-deep-l: 0.76;
+  --hl-deep-c: 0.13;
+  --hl-deep-ink: #16141f;
 }
 
 /* ==========================================================================
@@ -510,23 +525,49 @@ input:focus {
    ========================================================================== */
 
 .shell {
+  --side-w: 248px;
+  --list-col: var(--list-w);
   height: 100%;
   display: grid;
-  grid-template-columns: 248px var(--list-w) 0 minmax(0, 1fr);
+  grid-template-columns: var(--side-w) var(--list-col) 0 minmax(0, 1fr);
   overflow: hidden;
 }
+/* desktop only: on phones one pane shows at a time and these settings are ignored */
+@media (min-width: 861px) {
+  .shell.rail {
+    --side-w: 60px;
+  }
+  .shell.no-list {
+    --list-col: 0px;
+  }
+  .shell.no-list .list,
+  .shell.no-list .resizer {
+    visibility: hidden;
+    pointer-events: none;
+    min-width: 0;
+    overflow: hidden;
+  }
+}
 .shell.focus {
-  grid-template-columns: 0 0 0 minmax(0, 1fr);
-}
-.shell.no-sidebar:not(.focus) {
-  grid-template-columns: 0 var(--list-w) 0 minmax(0, 1fr);
-}
-.shell.no-sidebar .sidebar {
-  visibility: hidden;
+  --side-w: 0px;
+  --list-col: 0px;
 }
 .shell.focus .sidebar,
 .shell.focus .list {
   visibility: hidden;
+  min-width: 0;
+  overflow: hidden;
+}
+.shell.focus .resizer {
+  pointer-events: none;
+}
+
+/* the writing column (Page width setting; "auto" is resolved in app state) */
+.shell[data-width='wide'] .page {
+  max-width: 1100px;
+}
+.shell[data-width='full'] .page {
+  max-width: 1600px;
 }
 
 .resizer {
@@ -549,6 +590,70 @@ input:focus {
 
 .mobile-only {
   display: none !important;
+}
+
+/* ---- sidebar as an icon rail ---- */
+
+.sidebar.rail {
+  padding: 14px 8px 10px;
+  align-items: center;
+}
+.sidebar.rail .brand {
+  padding: 2px 0 10px;
+}
+.sidebar.rail .logo,
+.sidebar.rail .brand-name,
+.sidebar.rail .palette-btn span,
+.sidebar.rail .palette-btn kbd,
+.sidebar.rail .nav-item > span:not(.dot),
+.sidebar.rail .tags-head,
+.sidebar.rail .tags,
+.sidebar.rail .user-name {
+  display: none;
+}
+.sidebar.rail .nav {
+  flex: 1;
+}
+.sidebar.rail .palette-btn {
+  margin: 0 0 8px;
+  padding: 9px;
+}
+.sidebar.rail .nav-item {
+  justify-content: center;
+  width: 42px;
+  padding: 9px;
+}
+.sidebar.rail .sidebar-foot {
+  flex-direction: column;
+  gap: 6px;
+}
+.sidebar.rail .menu-wrap.grow {
+  flex: none;
+}
+.sidebar.rail .user-btn {
+  padding: 4px;
+}
+.rail-new {
+  margin-bottom: 8px;
+}
+.rail-filter {
+  position: relative;
+}
+.rail-filter .dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 8px;
+  height: 8px;
+}
+.menu-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 2px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--muted);
 }
 
 /* ---- sidebar ---- */
@@ -2042,6 +2147,140 @@ input:focus {
 }
 
 /* ==========================================================================
+   Text highlights
+   ========================================================================== */
+
+.hl {
+  background: oklch(var(--hl-l) var(--hl-c) var(--h));
+  color: var(--hl-ink);
+  border-radius: 3px;
+  padding: 1px 0;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+.hl.hl-deep {
+  background: oklch(var(--hl-deep-l) var(--hl-deep-c) var(--h));
+  color: var(--hl-deep-ink);
+}
+.hl-delim {
+  color: var(--muted);
+  opacity: 0.75;
+  font-size: 0.82em;
+}
+@media (forced-colors: active) {
+  .hl,
+  .hl.hl-deep {
+    background: Mark;
+    color: MarkText;
+  }
+}
+
+.hl-float {
+  position: fixed;
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-l);
+  animation: pop var(--fast) var(--ease);
+}
+.hl-float-last,
+.hl-swatch {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  font-weight: 650;
+  font-size: 14px;
+  background: oklch(var(--hl-l) var(--hl-c) var(--h));
+  color: var(--hl-ink);
+}
+.hl-float-last.deep,
+.hl-swatch.deep {
+  background: oklch(var(--hl-deep-l) var(--hl-deep-c) var(--h));
+  color: var(--hl-deep-ink);
+}
+.hl-menu {
+  position: absolute;
+  z-index: 41;
+  padding: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-l);
+  animation: pop var(--fast) var(--ease);
+}
+.hl-pop-bar {
+  right: 0;
+  top: calc(100% + 6px);
+}
+.hl-pop-float {
+  position: fixed;
+  z-index: 41;
+}
+.hl-pop-float .hl-menu {
+  position: static;
+}
+.hl-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.hl-grid [role='row'] {
+  display: grid;
+  grid-template-columns: repeat(12, 28px);
+  gap: 6px;
+}
+.hl-swatch {
+  width: 28px;
+  height: 28px;
+  transition: transform var(--fast);
+}
+.hl-swatch:hover {
+  transform: scale(1.12);
+}
+.hl-swatch.current {
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
+}
+.hl-remove {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  border-radius: 7px;
+  font-size: 13.5px;
+}
+.hl-remove:hover {
+  background: var(--surface-hover);
+}
+.hl-hint {
+  margin: 8px 2px 0;
+}
+@media (max-width: 560px) {
+  .hl-grid [role='row'] {
+    grid-template-columns: repeat(6, 36px);
+  }
+  .hl-swatch {
+    width: 36px;
+    height: 36px;
+  }
+  .hl-pop-bar {
+    position: fixed;
+    left: 8px;
+    right: 8px;
+    top: auto;
+    bottom: max(8px, env(safe-area-inset-bottom));
+  }
+}
+
+/* ==========================================================================
    Responsive
    ========================================================================== */
 
@@ -2065,7 +2304,7 @@ input:focus {
 
 @media (max-width: 1000px) {
   .shell {
-    grid-template-columns: 220px var(--list-w) 0 minmax(0, 1fr);
+    --side-w: 220px;
   }
   .hide-narrow {
     display: none;
@@ -2075,6 +2314,9 @@ input:focus {
 @media (max-width: 860px) {
   .mobile-only {
     display: inline-flex !important;
+  }
+  .desktop-only {
+    display: none !important;
   }
   .shell,
   .shell.focus {
@@ -2100,9 +2342,6 @@ input:focus {
   .sidebar:not(.open) {
     visibility: hidden;
     transition: transform 220ms var(--ease), visibility 0s 220ms;
-  }
-  .shell.no-sidebar .sidebar.open {
-    visibility: visible;
   }
   .drawer-scrim {
     display: block;

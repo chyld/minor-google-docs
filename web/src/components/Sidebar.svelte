@@ -59,29 +59,50 @@
     location.href = '/';
   }
 
+  const rail = $derived(app.sidebarCollapsed && app.desktop);
+  const filterNames = $derived(app.tagFilter.map((id) => app.tagById.get(id)?.name ?? '…').join(' + '));
+
   const themeIcon = $derived(app.theme === 'dark' ? 'moon' : app.theme === 'light' ? 'sun' : 'monitor');
   const nextTheme = $derived(app.theme === 'system' ? 'light' : app.theme === 'light' ? 'dark' : 'system');
 </script>
 
-<nav class="sidebar" class:open={app.sidebarOpen} aria-label="Sidebar" inert={app.sidebarHidden && !app.sidebarOpen}>
+<nav class="sidebar" class:open={app.sidebarOpen} class:rail aria-label="Sidebar">
   <div class="brand">
     <span class="logo" aria-hidden="true"></span>
     <span class="brand-name">Notes</span>
     <button class="icon-btn mobile-only" aria-label="Close sidebar" onclick={() => (app.sidebarOpen = false)}><Icon name="x" /></button>
+    <button
+      class="icon-btn desktop-only rail-toggle"
+      title={rail ? 'Expand sidebar (Ctrl+\\)' : 'Collapse sidebar (Ctrl+\\)'}
+      aria-label={rail ? 'Expand sidebar' : 'Collapse sidebar'}
+      aria-expanded={!rail}
+      onclick={() => app.setSidebarCollapsed(!app.sidebarCollapsed)}><Icon name={rail ? 'expand' : 'collapse'} /></button>
   </div>
 
-  <button class="palette-btn" onclick={() => (app.paletteOpen = true)}>
+  {#if rail}
+    <button class="nav-item rail-new" title="New note (Alt+N)" aria-label="New note" onclick={() => app.newNote()}><Icon name="plus" size={18} /></button>
+  {/if}
+
+  <button class="palette-btn" title={rail ? 'Jump to… (Ctrl+K)' : undefined} aria-label="Jump to…" onclick={() => (app.paletteOpen = true)}>
     <Icon name="search" size={16} /><span>Jump to…</span><kbd>Ctrl K</kbd>
   </button>
 
   <ul class="nav">
     {#each views as v (v.id)}
       <li>
-        <button class="nav-item" class:active={app.view === v.id && !app.tagFilter.length} onclick={() => app.setView(v.id)}>
+        <button class="nav-item" class:active={app.view === v.id && !app.tagFilter.length} title={rail ? v.label : undefined} aria-label={v.label} onclick={() => app.setView(v.id)}>
           <Icon name={v.icon} size={17} /><span>{v.label}</span>
         </button>
       </li>
     {/each}
+    {#if rail && app.tagFilter.length}
+      {@const first = app.tagById.get(app.tagFilter[0])}
+      <li>
+        <button class="nav-item active rail-filter" style="--h:{hue(first?.color ?? '')}" title="Filtered by {filterNames} — show tags" aria-label="Filtered by {filterNames}. Show tags" onclick={() => app.setSidebarCollapsed(false)}>
+          <Icon name="tag" size={17} /><span class="dot"></span>
+        </button>
+      </li>
+    {/if}
   </ul>
 
   <div class="tags-head">
@@ -135,7 +156,7 @@
 
   <div class="sidebar-foot">
     <div class="menu-wrap grow">
-      <button class="user-btn" onclick={() => (userMenu = !userMenu)} aria-haspopup="menu" aria-expanded={userMenu}>
+      <button class="user-btn" title={rail ? app.me?.username : undefined} aria-label="Account menu for {app.me?.username}" onclick={() => (userMenu = !userMenu)} aria-haspopup="menu" aria-expanded={userMenu}>
         <span class="avatar">{app.me?.username.slice(0, 1).toUpperCase()}</span>
         <span class="user-name">{app.me?.username}</span>
       </button>

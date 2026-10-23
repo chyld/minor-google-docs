@@ -1,8 +1,9 @@
-import { defineConfig } from 'vite';
+import { defineConfig } from 'vitest/config';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 
 export default defineConfig({
   plugins: [svelte()],
+  test: { css: { include: [/app\.css/] } }, // highlight.test.ts reads the colour tokens
   build: {
     outDir: '../internal/webui/dist',
     emptyOutDir: true,

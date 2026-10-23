@@ -17,6 +17,7 @@ import {
 import { EditorView, ViewPlugin, type ViewUpdate } from '@codemirror/view';
 import { MARKER_RE } from '../ids';
 import { registry } from '../registry';
+import { visualEdges } from '../highlight';
 
 /** Our own structural edits: skip the guard and selection normalization. */
 export const imageOp = Annotation.define<boolean>();
@@ -372,6 +373,10 @@ function onKeydown(e: KeyboardEvent, view: EditorView): boolean {
   const next = L.number < doc.lines ? doc.line(L.number + 1) : null;
   const prevImg = prev && isImageLine(prev) ? prev : null;
   const nextImg = next && isImageLine(next) ? next : null;
+  // a highlight opening/closing the line hides its delimiter there: its text edge counts as the line's
+  const edges = visualEdges(L.text);
+  const atStart = r.head === L.from || r.head === L.from + edges.start;
+  const atEnd = r.head === L.to || r.head === L.from + edges.end;
   switch (e.key) {
     case 'ArrowUp':
       if (prevImg && doc.lineAt(view.moveVertically(r, false).head).number !== L.number) return selectImage(view, prevImg), done();
@@ -380,21 +385,21 @@ function onKeydown(e: KeyboardEvent, view: EditorView): boolean {
       if (nextImg && doc.lineAt(view.moveVertically(r, true).head).number !== L.number) return selectImage(view, nextImg), done();
       return false;
     case 'ArrowLeft':
-      if (prevImg && r.head === L.from) return selectImage(view, prevImg), done();
+      if (prevImg && atStart) return selectImage(view, prevImg), done();
       return false;
     case 'ArrowRight':
-      if (nextImg && r.head === L.to) return selectImage(view, nextImg), done();
+      if (nextImg && atEnd) return selectImage(view, nextImg), done();
       return false;
     case 'Backspace':
       // From text, the first press only selects the image. An empty line just goes (the default
       // join, which then selects the image) — but a held key stops here instead.
-      if (!prevImg || r.head !== L.from) return false;
+      if (!prevImg || !atStart) return false;
       if (e.repeat) return done();
       if (L.length === 0) return false;
       selectImage(view, prevImg);
       return done();
     case 'Delete':
-      if (!nextImg || r.head !== L.to) return false;
+      if (!nextImg || !atEnd) return false;
       if (e.repeat) return done();
       if (L.length === 0) return false;
       selectImage(view, nextImg);

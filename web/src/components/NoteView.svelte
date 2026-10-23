@@ -9,6 +9,7 @@
   import { fullTime, relativeTime, wordCount } from '../lib/format';
   import { hue } from '../lib/colors';
   import { menu } from '../lib/a11y';
+  import { PAGE_WIDTHS } from '../lib/layout';
   import type { NoteSaver, SaveStatus, Conflict } from '../lib/saver';
   import { anyUnsaved, claimSaver, createSaver, draftAll, existingSaver, fixRetiredRefs, forgetSaver, releaseSaver, setLiveEditor, unloadAll } from '../lib/savers';
   import type { Attachment, Note } from '../lib/types';
@@ -18,6 +19,9 @@
   import Attachments from './Attachments.svelte';
   import Lightbox from './Lightbox.svelte';
   import Icon from './Icon.svelte';
+  import HighlightMenu from './HighlightMenu.svelte';
+  import { hlHue, isHlName, stripHighlights } from '../lib/highlight';
+  import type { HighlightInfo } from '../lib/editor/highlights';
 
   interface Props {
     id: string;
@@ -40,8 +44,19 @@
   let loadSeq = 0;
   let countTimer: ReturnType<typeof setTimeout> | undefined;
 
+  let hl = $state<HighlightInfo>({ can: false, empty: true, current: null, focused: false, dragging: false, rect: null });
+  let hlMenu = $state<'bar' | 'float' | null>(null);
+  let hlLast = $state<string | null>(isHlName(localStorage.getItem('notes.hlLast') ?? '') ? localStorage.getItem('notes.hlLast') : null);
+  let scroller: HTMLDivElement | undefined = $state();
+  let box = $state<DOMRect | null>(null); // the scroll area, when the selection was last reported
+  let barW = $state(90);
+  let barH = $state(36);
+  let popW = $state(430);
+  let popH = $state(110);
+
   const readonly = $derived(!!note?.trashed_at);
-  const words = $derived(wordCount(counted));
+  const plain = $derived(stripHighlights(counted)); // counts ignore highlight delimiters
+  const words = $derived(wordCount(plain));
   const shownRefs = $derived(refsIn(counted));
   const draftKey = (nid: string) => `${app.me?.id}:${nid}`;
   const accent = $derived(note?.tag_ids.length ? hue(app.tagById.get(note.tag_ids[0])?.color ?? '') : null);
@@ -97,6 +112,7 @@
     status = 'saved';
     lightboxRef = null;
     menuOpen = false;
+    hlMenu = null;
     setLiveEditor(null);
     editor?.setDoc('', true); // read-only until we know what to show
     try {
@@ -164,6 +180,50 @@
 
   function saveNow(): Promise<void> {
     return saver?.flush() ?? Promise.resolve();
+  }
+
+  // ---- highlighting ----
+
+  // the small bar above a selection (desktop only: on touch it would fight the system's own)
+  // (viewport coordinates, kept inside the scroll area: above the selection, or below it near the top)
+  const inView = $derived(!!hl.rect && !!box && hl.rect.bottom > box.top && hl.rect.top < box.bottom);
+  const floatShown = $derived(!readonly && app.desktop && inView && !hl.empty && ((hl.focused && !hl.dragging) || hlMenu === 'float'));
+  const barPos = $derived.by(() => {
+    if (!hl.rect || !box) return { left: 0, top: 0 };
+    const above = hl.rect.top - barH - 8;
+    const top = above >= box.top + 4 ? above : hl.rect.bottom + 8;
+    const left = Math.min(Math.max(hl.rect.left - 8, box.left + 4), box.right - barW - 4);
+    return { left, top };
+  });
+  const popPos = $derived.by(() => {
+    const below = barPos.top + barH + 6;
+    const top = below + popH <= window.innerHeight - 8 ? below : Math.max(8, barPos.top - popH - 6);
+    const left = Math.min(Math.max(barPos.left, 8), window.innerWidth - popW - 8);
+    return { left, top };
+  });
+
+  function onSelectionInfo(i: HighlightInfo) {
+    hl = i;
+    box = scroller?.getBoundingClientRect() ?? null;
+  }
+
+  function pickHighlight(name: string | null) {
+    hlMenu = null;
+    editor.highlight(name);
+    if (name && isHlName(name)) {
+      hlLast = name;
+      localStorage.setItem('notes.hlLast', name);
+    }
+  }
+
+  function closeHighlightMenu() {
+    hlMenu = null;
+    editor.focus();
+  }
+
+  function openHighlightMenu() {
+    if (!hl.can || readonly) return;
+    hlMenu = floatShown ? 'float' : 'bar';
   }
 
   // ---- conflict resolution ----
@@ -392,6 +452,9 @@
   <div class="note-main" class:hidden={!!loadError}>
     <header class="note-bar">
       <button class="icon-btn mobile-only" aria-label="Back to list" onclick={() => app.select(null)}><Icon name="back" /></button>
+      {#if app.listCollapsed && app.desktop && !app.focusMode}
+        <button class="icon-btn desktop-only" title="Show notes list (Ctrl+Shift+\\)" aria-label="Show notes list" aria-expanded="false" onclick={() => app.setListCollapsed(false)}><Icon name="list" /></button>
+      {/if}
       <div class="status" data-status={status} title={statusDetail || statusLabel[status]} role="status" aria-live="polite">
         <span class="status-dot" aria-hidden="true"></span><span class="status-text">{statusLabel[status]}{#if statusDetail}<span class="sr-only">: {statusDetail}</span>{/if}</span>
       </div>
@@ -400,6 +463,21 @@
       {/if}
       <div class="spacer"></div>
       {#if note && !readonly}
+        <div class="menu-wrap">
+          <button
+            class="icon-btn"
+            title="Highlight (Ctrl+Shift+H)"
+            aria-label="Highlight"
+            aria-haspopup="grid"
+            aria-expanded={hlMenu === 'bar'}
+            disabled={!hl.can}
+            onmousedown={(e) => e.preventDefault()}
+            onclick={() => (hlMenu = hlMenu === 'bar' ? null : 'bar')}><Icon name="highlight" /></button>
+          {#if hlMenu === 'bar'}
+            <button class="menu-scrim" tabindex="-1" aria-hidden="true" onmousedown={(e) => e.preventDefault()} onclick={closeHighlightMenu}></button>
+            <HighlightMenu class="hl-pop-bar" current={hl.current} last={hlLast} onpick={pickHighlight} onclose={closeHighlightMenu} />
+          {/if}
+        </div>
         <button class="icon-btn" class:on={note.pinned} title={note.pinned ? 'Unpin' : 'Pin to top'} aria-label={note.pinned ? 'Unpin' : 'Pin to top'} aria-pressed={note.pinned} onclick={() => patch({ pinned: !note!.pinned })}>
           <Icon name="pin" />
         </button>
@@ -429,9 +507,18 @@
             {#if menuOpen}
               <button class="menu-scrim" tabindex="-1" aria-hidden="true" onclick={() => (menuOpen = false)}></button>
               <div class="menu menu-right" role="menu" use:menu={{ onclose: () => (menuOpen = false) }}>
-                <button role="menuitem" onclick={duplicate}><Icon name="copy" size={16} /> Duplicate</button>
+                <button role="menuitem" data-first onclick={duplicate}><Icon name="copy" size={16} /> Duplicate</button>
                 <button role="menuitem" onclick={() => ((menuOpen = false), app.setMono(!app.mono))}><Icon name="type" size={16} /> {app.mono ? 'Proportional font' : 'Monospace font'}</button>
                 <button role="menuitem" onclick={() => ((menuOpen = false), (app.focusMode = !app.focusMode))}><Icon name="focus" size={16} /> {app.focusMode ? 'Exit focus mode' : 'Focus mode'}</button>
+                <hr />
+                <div class="menu-label" id="width-label"><Icon name="width" size={14} /> Page width</div>
+                <div role="group" aria-labelledby="width-label">
+                  {#each PAGE_WIDTHS as w (w.id)}
+                    <button role="menuitemradio" aria-checked={app.pageWidth === w.id} title={w.hint} onclick={() => ((menuOpen = false), app.setPageWidth(w.id))}>
+                      <span class="check">{#if app.pageWidth === w.id}<Icon name="check" size={14} />{/if}</span>{w.label}
+                    </button>
+                  {/each}
+                </div>
                 <hr />
                 <button role="menuitem" class="danger" onclick={() => ((menuOpen = false), trash())}><Icon name="trash" size={16} /> Move to trash</button>
               </div>
@@ -448,7 +535,7 @@
       <div class="trash-banner"><Icon name="trash" size={16} /> This note is in the trash{app.trashDays > 0 ? ` and will be deleted after ${app.trashDays} days` : ''}. Restore it to edit.</div>
     {/if}
 
-    <div class="note-scroll">
+    <div class="note-scroll" bind:this={scroller} onscroll={() => editor?.report()}>
       <div class="page" class:mono={app.mono}>
         {#if note}
           <div class="note-tags">
@@ -458,7 +545,7 @@
           <div class="note-skeleton" aria-hidden="true"><span></span><span></span><span></span></div>
         {/if}
         <div class:invisible={!note}>
-          <Editor bind:this={editor} {onchange} onfiles={handleFiles} onsave={saveNow} onblur={saveNow} />
+          <Editor bind:this={editor} {onchange} onfiles={handleFiles} onsave={saveNow} onblur={saveNow} onselection={onSelectionInfo} onhighlightkey={openHighlightMenu} />
         </div>
       </div>
     </div>
@@ -466,7 +553,7 @@
     {#if note}
       <footer class="note-foot muted small">
         <span>{words.toLocaleString()} {words === 1 ? 'word' : 'words'}</span>
-        <span>{counted.length.toLocaleString()} characters</span>
+        <span>{plain.length.toLocaleString()} characters</span>
         <span class="hide-narrow">Paste screenshots · drop files · Alt+T inserts time</span>
       </footer>
     {/if}
@@ -483,6 +570,26 @@
       onopen={(ref) => (lightboxRef = ref)}
       onclose={() => (attOpen = false)}
     />
+  {/if}
+
+  {#if floatShown}
+    <!-- the little bar above a selection (desktop); mousedown is prevented so the editor keeps its selection -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="hl-float" style="left:{barPos.left}px; top:{barPos.top}px" bind:offsetWidth={barW} bind:offsetHeight={barH} onmousedown={(e) => e.preventDefault()}>
+      {#if hlLast}
+        <button class="hl-float-last" title="Highlight ({hlLast})" aria-label="Highlight in the last colour" style="--h:{hlHue(hlLast)}" class:deep={hlLast.endsWith('-deep')} onclick={() => pickHighlight(hlLast)}><span>a</span></button>
+      {/if}
+      <button class="icon-btn tiny" title="Highlight colours (Ctrl+Shift+H)" aria-label="Highlight colours" aria-haspopup="grid" aria-expanded={hlMenu === 'float'} onclick={() => (hlMenu = hlMenu === 'float' ? null : 'float')}><Icon name="highlight" size={16} /></button>
+      {#if hl.current}
+        <button class="icon-btn tiny" title="Remove highlight" aria-label="Remove highlight" onclick={() => pickHighlight(null)}><Icon name="x" size={14} /></button>
+      {/if}
+    </div>
+    {#if hlMenu === 'float'}
+      <button class="menu-scrim" tabindex="-1" aria-hidden="true" onmousedown={(e) => e.preventDefault()} onclick={closeHighlightMenu}></button>
+      <div class="hl-pop-float" style="left:{popPos.left}px; top:{popPos.top}px" bind:offsetWidth={popW} bind:offsetHeight={popH}>
+        <HighlightMenu current={hl.current} last={hlLast} onpick={pickHighlight} onclose={closeHighlightMenu} />
+      </div>
+    {/if}
   {/if}
 
   {#if lightboxRef && lightboxImages.length}

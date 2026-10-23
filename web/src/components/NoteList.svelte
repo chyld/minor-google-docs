@@ -106,7 +106,7 @@
   ];
 </script>
 
-<section class="list" class:trash={app.view === 'trash'} aria-label="Notes">
+<section class="list" class:trash={app.view === 'trash'} aria-label="Notes" inert={app.listCollapsed && app.desktop && !app.focusMode}>
   <header class="list-head">
     <div class="list-title-row">
       <button class="icon-btn mobile-only" aria-label="Open sidebar" onclick={() => (app.sidebarOpen = true)}><Icon name="menu" /></button>
@@ -126,6 +126,7 @@
           </div>
         {/if}
       </div>
+      <button class="icon-btn desktop-only" title="Hide notes list (Ctrl+Shift+\\)" aria-label="Hide notes list" aria-expanded="true" onclick={() => app.setListCollapsed(true)}><Icon name="collapse" /></button>
       {#if app.view !== 'trash'}
         <button class="btn primary small new-btn" onclick={() => app.newNote()} title="New note (Alt+N)"><Icon name="plus" size={16} /> New</button>
       {/if}

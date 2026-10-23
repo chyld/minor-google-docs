@@ -33,11 +33,14 @@ func NormalizeBody(body string) (string, error) {
 	return strings.ReplaceAll(body, "\r", "\n"), nil
 }
 
-// DeriveTitle returns the first non-empty, non-marker line, truncated.
+// DeriveTitle returns the first non-empty, non-marker line, truncated (highlights stripped first).
 func DeriveTitle(body string) string {
 	for line := range strings.SplitSeq(body, "\n") {
-		t := strings.TrimSpace(line)
-		if t == "" || IsMarker(line) {
+		if IsMarker(line) {
+			continue
+		}
+		t := strings.TrimSpace(StripHighlights(line))
+		if t == "" {
 			continue
 		}
 		return truncateRunes(t, maxTitleRunes)
@@ -50,8 +53,11 @@ func DerivePreview(body string) string {
 	var b strings.Builder
 	seenTitle := false
 	for line := range strings.SplitSeq(body, "\n") {
-		t := strings.TrimSpace(line)
-		if t == "" || IsMarker(line) {
+		if IsMarker(line) {
+			continue
+		}
+		t := strings.TrimSpace(StripHighlights(line))
+		if t == "" {
 			continue
 		}
 		if !seenTitle {

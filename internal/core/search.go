@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
@@ -77,7 +78,13 @@ func (s *Store) addSnippets(uid, q string, items []NoteMeta) {
 		carry := 0
 		for {
 			n, err := io.ReadFull(f, buf[carry:])
-			text := StripMarkers(strings.ToValidUTF8(string(buf[:carry+n]), "")) // a cut mid-rune is dropped
+			chunk := buf[:carry+n]
+			if err == nil { // more follows: end at a line break inside the overlap, so no highlight is cut in half
+				if i := bytes.LastIndexByte(chunk[len(chunk)-overlap:], '\n'); i >= 0 {
+					chunk = chunk[:len(chunk)-overlap+i]
+				}
+			}
+			text := SearchText(strings.ToValidUTF8(string(chunk), "")) // a cut mid-rune is dropped
 			if seg := Snippet(text, q); seg != nil {
 				items[i].Snippet = seg
 				break
@@ -248,7 +255,7 @@ func (s *Store) indexNote(ctx context.Context, id string) error {
 	if _, err := tx.Exec(`DELETE FROM notes_fts WHERE note_id=?`, id); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`INSERT INTO notes_fts(title,body,note_id,user_id) VALUES(?,?,?,?)`, title, StripMarkers(body), id, uid); err != nil {
+	if _, err := tx.Exec(`INSERT INTO notes_fts(title,body,note_id,user_id) VALUES(?,?,?,?)`, title, SearchText(body), id, uid); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`INSERT INTO indexed(note_id,content_sha256) VALUES(?,?) ON CONFLICT(note_id) DO UPDATE SET content_sha256=excluded.content_sha256`, id, sha); err != nil {

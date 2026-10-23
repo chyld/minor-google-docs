@@ -255,3 +255,38 @@ func TestDoctorLeavesInterruptedPurgeAlone(t *testing.T) {
 		t.Fatal("doctor recreated a note that was being purged")
 	}
 }
+
+func TestHighlightFixtures(t *testing.T) {
+	raw, err := os.ReadFile("testdata/highlights.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fx struct {
+		Names []string
+		Strip []struct{ In, Out string }
+	}
+	if err := json.Unmarshal(raw, &fx); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(fx.Names, ",") != strings.Join(HighlightNames, ",") {
+		t.Fatalf("names differ from the shared fixture: %v", HighlightNames)
+	}
+	for _, c := range fx.Strip {
+		if got := StripHighlights(c.In); got != c.Out {
+			t.Errorf("StripHighlights(%q) = %q, want %q", c.In, got, c.Out)
+		}
+	}
+}
+
+func TestHighlightsInTitlesAndPreviews(t *testing.T) {
+	body := "=={amber}Server== notes\n=={coral} ==\nIP =={sky-deep}10.0.0.1== and more"
+	if got := DeriveTitle(body); got != "Server notes" {
+		t.Fatalf("title %q", got)
+	}
+	if got := DerivePreview(body); got != "IP 10.0.0.1 and more" {
+		t.Fatalf("preview %q", got)
+	}
+	if got := SearchText("[image:abcdefghij] x.png\n=={mint}admin=="); got != "admin" {
+		t.Fatalf("search text %q", got)
+	}
+}

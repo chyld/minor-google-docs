@@ -5,6 +5,7 @@
   import type { NoteMeta } from '../lib/types';
   import { composing, dialog } from '../lib/a11y';
   import Icon from './Icon.svelte';
+  import { PAGE_WIDTHS } from '../lib/layout';
 
   type Item =
     | { kind: 'note'; id: string; label: string; note: NoteMeta }
@@ -22,6 +23,13 @@
     { kind: 'action', id: 'theme', label: 'Toggle dark mode', icon: 'moon', run: () => app.setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark') },
     { kind: 'action', id: 'trash', label: 'Go to trash', icon: 'trash', run: () => app.setView('trash') },
     { kind: 'action', id: 'focus', label: 'Toggle focus mode', icon: 'focus', hint: 'Ctrl ⇧ F', run: () => (app.focusMode = !app.focusMode) },
+    ...(app.desktop
+      ? ([
+          { kind: 'action', id: 'sidebar', label: app.sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar', icon: 'sidebar', hint: 'Ctrl \\', run: () => app.setSidebarCollapsed(!app.sidebarCollapsed) },
+          { kind: 'action', id: 'list', label: app.listCollapsed ? 'Show notes list' : 'Hide notes list', icon: 'list', hint: 'Ctrl ⇧ \\', run: () => app.setListCollapsed(!app.listCollapsed) },
+          ...PAGE_WIDTHS.map((w) => ({ kind: 'action', id: `width-${w.id}`, label: `Page width: ${w.label}${app.pageWidth === w.id ? ' (current)' : ''}`, icon: 'width', run: () => app.setPageWidth(w.id) })),
+        ] as Item[])
+      : []),
     { kind: 'action', id: 'account', label: 'Account & data', icon: 'user', run: () => (app.accountOpen = true) },
     { kind: 'action', id: 'keys', label: 'Keyboard shortcuts', icon: 'keyboard', hint: '?', run: () => (app.shortcutsOpen = true) },
     {

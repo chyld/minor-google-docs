@@ -3,6 +3,7 @@
 // Editing rules for image lines live in images.ts.
 import { EditorState, type Extension, RangeSet, StateField, type Range, type Transaction } from '@codemirror/state';
 import { Decoration, type DecorationSet, EditorView, WidgetType } from '@codemirror/view';
+import { stripHighlights } from '../highlight';
 import { MARKER_RE } from '../ids';
 import { attachmentURL } from '../api';
 import { registry, type RefState } from '../registry';
@@ -187,7 +188,7 @@ function build(state: EditorState): DecorationSet {
         continue;
       }
     }
-    if (!titleDone && text.trim() !== '') {
+    if (!titleDone && stripHighlights(text).trim() !== '') {
       decos.push(titleLine.range(line.from));
       titleDone = true;
     }
@@ -221,7 +222,7 @@ function needsRebuild(tr: Transaction): boolean {
 function firstTextLineEnd(doc: EditorState['doc']): number {
   for (let i = 1; i <= doc.lines; i++) {
     const l = doc.line(i);
-    if (l.text.trim() !== '' && !MARKER_RE.test(l.text)) return l.to + 1;
+    if (stripHighlights(l.text).trim() !== '' && !MARKER_RE.test(l.text)) return l.to + 1;
   }
   return doc.length;
 }
