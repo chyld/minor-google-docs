@@ -3,6 +3,7 @@ import { EditorView } from '@codemirror/view';
 import { parseLine } from '../highlight';
 import { MARKER_RE } from '../ids';
 import { parseHeading } from '../heading';
+import { stripHighlights } from '../highlight';
 import { RAW_MIME } from './highlights';
 
 /**
@@ -15,10 +16,13 @@ const protectOnReplace = EditorState.changeFilter.of((tr) => {
   if (!tr.isUserEvent('input.replace')) return true;
   const out: number[] = [];
   const doc = tr.startState.doc;
+  let title = true; // the title line is never a section, so its "## {colour} " is plain text
   for (let n = 1; n <= doc.lines; n++) {
     const l = doc.line(n);
     const m = MARKER_RE.exec(l.text);
-    const h = m ? null : parseHeading(l.text);
+    const isTitle = title && !m && stripHighlights(l.text).trim() !== '';
+    if (isTitle) title = false;
+    const h = m || isTitle ? null : parseHeading(l.text);
     if (m) out.push(l.from, l.from + m[1].length + 8); // "[image:" + ref + "]"
     else if (h) out.push(l.from, l.from + h.prefix); // "## {colour} "
     else for (const h of parseLine(l.text, l.from)) out.push(h.from, h.innerFrom, h.innerTo, h.to);

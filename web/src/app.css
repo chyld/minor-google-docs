@@ -1268,8 +1268,21 @@ input:focus {
   vertical-align: -3px;
   border-radius: 6px;
   color: inherit;
-  opacity: 0.55;
+  opacity: 0.8; /* the heading ink: readable against the page in every hue */
   cursor: pointer;
+}
+@media (pointer: coarse) {
+  /* a 40px touch target around the 22px buttons, without changing the line's height */
+  .sec-chevron,
+  .sec-menu-btn {
+    position: relative;
+  }
+  .sec-chevron::after,
+  .sec-menu-btn::after {
+    content: '';
+    position: absolute;
+    inset: -9px;
+  }
 }
 .sec-chevron svg {
   transition: transform var(--fast);

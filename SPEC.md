@@ -762,6 +762,8 @@ A note can be divided into named, coloured sections. Design reviewed by the beta
     the server's derived title strips the markup. This is accepted: insertion never puts one there.
 - **Heading controls.**
   - An arrow before the name collapses or opens the section.
+  - Both are 22px buttons at the heading's ink colour. Coarse pointers get a 40px invisible hit area
+    that doesn't change the line height.
   - A ⋯ button after it (shown on hover or when the cursor is on the heading; always on touch screens)
     opens a menu: Colour… (the 24-swatch grid; "Remove section" there too), Move up, Move down,
     Collapse/Show, and Remove section (keeps text).
@@ -784,11 +786,18 @@ A note can be divided into named, coloured sections. Design reviewed by the beta
     the rest into the body.
   - Backspace at the first body line's start, Delete at the heading's end, and Delete at the end of a
     non-blank line just above a heading move the cursor instead of merging lines.
-  - A heading whose name is deleted loses its markup.
+  - These rules apply to every change in an edit: several cursors, or an edit that the highlight
+    rules split in two. With several cursors, a deletion that would merge a body (or the line above)
+    into a heading is dropped.
+  - A heading whose name is deleted loses its markup, even by replace-all.
+  - The image rules run first, so Delete at a heading's end when the body starts with an image is
+    refused by them. Nothing changes, and the cursor doesn't move across. This is accepted.
   - Add, recolour, remove and move are each one undo step.
-  - Replace-all never rewrites the markup, in the rendered view or in raw text (§20).
+  - Replace-all never rewrites the markup, in the rendered view or in raw text (§20). Raw text exempts
+    the title line, which is never a section.
 - **Moving.** Move up/down swaps a section's text (heading to its last non-blank line) with its
-  neighbour's. The blank lines between and after them stay where they are. The text before the first section never moves. The cursor, in either of the two
+  neighbour's. The blank lines between and after them stay where they are. Undo and redo of a move put
+  collapsed sections back (`invertedEffects` replays the folds). The text before the first section never moves. The cursor, in either of the two
   swapped sections, and their collapsed state travel with them.
 - **Collapsing.**
   - Folds the body (heading end → last non-blank line) behind a "⋯ N lines" button.

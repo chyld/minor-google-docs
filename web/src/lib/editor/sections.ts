@@ -19,7 +19,7 @@ import {
 } from '@codemirror/state';
 import { Decoration, EditorView, RectangleMarker, ViewPlugin, WidgetType, layer, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import { codeFolding, foldEffect, foldedRanges, unfoldEffect } from '@codemirror/language';
-import { isolateHistory } from '@codemirror/commands';
+import { invertedEffects, isolateHistory } from '@codemirror/commands';
 import { hlDeep, hlHue, stripHighlights } from '../highlight';
 import { headingLine, parseHeading } from '../heading';
 import { MARKER_RE } from '../ids';
@@ -217,6 +217,19 @@ const openOnSelect = EditorState.transactionExtender.of((tr) => {
     });
   }
   return effects.length ? { effects } : null;
+});
+
+// undo/redo of a move (and moves themselves) put collapsed sections back: history replays the folds
+// that were there before the change
+const foldHistory = invertedEffects.of((tr) => {
+  if (!tr.docChanged || !(tr.isUserEvent('move.section') || tr.isUserEvent('undo') || tr.isUserEvent('redo'))) return [];
+  const out: StateEffect<unknown>[] = [];
+  const touched: [number, number][] = [];
+  tr.changes.iterChangedRanges((a, b) => void touched.push([a, b]));
+  foldedRanges(tr.startState).between(0, tr.startState.doc.length, (f, t) => {
+    if (touched.some(([a, b]) => a <= t && b >= f)) out.push(foldEffect.of({ from: f, to: t }));
+  });
+  return out;
 });
 
 const folding = codeFolding({
@@ -453,64 +466,97 @@ const normalize = EditorState.transactionFilter.of((tr) => {
 const guard = EditorState.transactionFilter.of((tr): TransactionSpec | readonly TransactionSpec[] => {
   if (!tr.docChanged || tr.annotation(sectionOp) || tr.annotation(imageOp) || tr.annotation(highlightOp)) return tr;
   const ev = tr.annotation(Transaction.userEvent);
-  if (!ev || ev === 'input.replace') return tr;
+  if (!ev) return tr;
   const start = tr.startState;
   const secs = sectionsOf(start);
   if (!secs.length) return tr;
   const doc = start.doc;
   const changes: { from: number; to: number; insert: string }[] = [];
   tr.changes.iterChanges((from, to, _fb, _tb, ins) => void changes.push({ from, to, insert: ins.toString() }));
-  if (changes.length !== 1) return tr; // multi-range edits (search-replace etc.) go through as they are
-  const c = changes[0];
-  const sel = start.selection.main;
-
-  // Backspace at a body's first line start / Delete at the heading end: move, don't merge
-  if (c.insert === '' && c.to === c.from + 1 && sel.empty) {
-    const s = secs.find((x) => x.headTo === c.from);
-    if (s && c.to <= doc.length && doc.lineAt(c.to).text.trim() !== '') {
-      if (tr.isUserEvent('delete.backward') && sel.head === c.to) return { selection: { anchor: s.headTo }, scrollIntoView: true };
-      if (tr.isUserEvent('delete.forward') && sel.head === c.from) return { selection: { anchor: c.to }, scrollIntoView: true };
-    }
-  }
-
   const nameStart = (x: Section) => x.from + x.prefix;
   const inside = (p: number, x: Section) => p > x.from && p < nameStart(x);
+  const replace = ev === 'input.replace';
+  const sel = start.selection.main;
+  const single = changes.length === 1 && start.selection.ranges.length === 1 && !replace;
 
-  // Enter at the name's start: the new line goes above the heading
-  if (c.from === c.to && c.insert === '\n' && sel.empty) {
-    const h = secs.find((x) => nameStart(x) === c.from);
-    if (h) return { changes: { from: h.from, insert: '\n' }, selection: { anchor: nameStart(h) + 1 }, userEvent: ev, scrollIntoView: true };
-  }
-
-  // Delete at the end of a line just above a heading doesn't pull the heading up into it
-  if (c.insert === '' && c.to === c.from + 1 && sel.empty && tr.isUserEvent('delete.forward')) {
-    const h = secs.find((x) => x.from === c.to);
-    if (h && doc.lineAt(c.from).text.trim() !== '') return { selection: { anchor: nameStart(h) }, scrollIntoView: true };
-  }
-
-  const s = secs.find((x) => inside(c.from, x) || (c.to > c.from && inside(c.to, x)));
-  if (s) {
-    const end = nameStart(s);
-    // typing inside the hidden part lands at the name's start
-    if (c.from === c.to) return { changes: { from: end, insert: c.insert }, selection: { anchor: end + c.insert.length }, userEvent: ev, scrollIntoView: true };
-    // a deletion reaching into it takes all of it (and whatever else it covered)
-    const from = Math.min(c.from, s.from);
-    const to = Math.max(c.to, end);
-    return { changes: { from, to, insert: c.insert }, selection: { anchor: from + c.insert.length }, userEvent: ev, scrollIntoView: true };
-  }
-
-  // a heading left with no name stops being one: drop its "## {colour} "
-  const after = tr.newDoc;
-  for (const x of secs) {
-    if (c.to < x.from || c.from > x.headTo) continue;
-    const from = tr.changes.mapPos(x.from, 1);
-    const line = after.lineAt(Math.min(from, after.length));
-    const text = line.text;
-    if (line.from === from && text.startsWith(`## {${x.color}} `) && !parseHeading(text) && text.slice(x.prefix).trim() === '') {
-      return [tr, { changes: { from: line.from, to: line.from + Math.min(x.prefix, text.length) }, sequential: true }];
+  if (single) {
+    const c = changes[0];
+    // Backspace at a body's first line start / Delete at the heading end: move, don't merge
+    if (c.insert === '' && c.to === c.from + 1 && sel.empty) {
+      const s = secs.find((x) => x.headTo === c.from);
+      if (s && c.to <= doc.length && doc.lineAt(c.to).text.trim() !== '') {
+        if (tr.isUserEvent('delete.backward') && sel.head === c.to) return { selection: { anchor: s.headTo }, scrollIntoView: true };
+        if (tr.isUserEvent('delete.forward') && sel.head === c.from) return { selection: { anchor: c.to }, scrollIntoView: true };
+      }
+    }
+    // Enter at the name's start: the new line goes above the heading
+    if (c.from === c.to && c.insert === '\n' && sel.empty) {
+      const h = secs.find((x) => nameStart(x) === c.from);
+      if (h) return { changes: { from: h.from, insert: '\n' }, selection: { anchor: nameStart(h) + 1 }, userEvent: ev, scrollIntoView: true };
+    }
+    // Delete at the end of a line just above a heading doesn't pull the heading up into it
+    if (c.insert === '' && c.to === c.from + 1 && sel.empty && tr.isUserEvent('delete.forward')) {
+      const h = secs.find((x) => x.from === c.to);
+      if (h && doc.lineAt(c.from).text.trim() !== '') return { selection: { anchor: nameStart(h) }, scrollIntoView: true };
     }
   }
-  return tr;
+
+  // every change (several cursors, or an edit the highlight rules split in two): one reaching into the
+  // markup takes all of it, typing inside it lands at the name's start, and (with several cursors) a
+  // deletion that would merge a body or the line above into a heading is dropped
+  let out = changes;
+  let reshaped = false;
+  let caret: number | null = null; // the cursor after a single reshaped edit
+  if (!replace) {
+    out = [];
+    for (const c of changes) {
+      if (!single && c.insert === '' && c.to === c.from + 1) {
+        const merge =
+          secs.some((x) => x.headTo === c.from && c.to <= doc.length && doc.lineAt(c.to).text.trim() !== '') ||
+          secs.some((x) => x.from === c.to && doc.lineAt(c.from).text.trim() !== '');
+        if (merge) {
+          reshaped = true;
+          continue;
+        }
+      }
+      const s = secs.find((x) => inside(c.from, x) || (c.to > c.from && inside(c.to, x)));
+      if (!s) {
+        out.push(c);
+        continue;
+      }
+      reshaped = true;
+      const end = nameStart(s);
+      const fixed = c.from === c.to ? { from: end, to: end, insert: c.insert } : { from: Math.min(c.from, s.from), to: Math.max(c.to, end), insert: c.insert };
+      out.push(fixed);
+      caret = fixed.from + c.insert.length;
+    }
+    out.sort((a, b) => a.from - b.from || a.to - b.to);
+    for (let i = 1; i < out.length; i++) {
+      if (out[i].from < out[i - 1].to) {
+        out[i - 1] = { from: out[i - 1].from, to: Math.max(out[i - 1].to, out[i].to), insert: out[i - 1].insert + out[i].insert };
+        out.splice(i--, 1);
+      }
+    }
+  }
+  const cs = reshaped ? ChangeSet.of(out, doc.length) : tr.changes;
+  const after = reshaped ? cs.apply(doc) : tr.newDoc;
+
+  // a heading left with no name stops being one: drop its "## {colour} " (also after a replace-all)
+  const blanks: { from: number; to: number }[] = [];
+  for (const x of secs) {
+    if (!out.some((c) => c.from <= x.headTo && c.to >= x.from)) continue;
+    const from = cs.mapPos(x.from, 1);
+    if (from > after.length) continue;
+    const line = after.lineAt(from);
+    const text = line.text;
+    if (line.from === from && text.startsWith(`## {${x.color}} `) && !parseHeading(text) && text.slice(x.prefix).trim() === '') {
+      blanks.push({ from: line.from, to: line.from + Math.min(x.prefix, text.length) });
+    }
+  }
+  const tidy: TransactionSpec[] = blanks.length ? [{ changes: blanks, sequential: true }] : [];
+  if (!reshaped) return tidy.length ? [tr, ...tidy] : tr;
+  const selection = single && caret !== null ? EditorSelection.single(caret) : start.selection.map(cs, 1);
+  return [{ changes: cs, selection, userEvent: ev, scrollIntoView: true }, ...tidy];
 });
 
 /** Search-and-replace never rewrites "## {colour} " (replacing "teal" can't recolour a section). */
@@ -635,5 +681,5 @@ export function gotoSection(view: EditorView, index: number) {
 }
 
 export function sections(): Extension {
-  return [headField, folding, openOnSelect, drawer, bars, normalize, guard, protectOnReplace];
+  return [headField, folding, foldHistory, openOnSelect, drawer, bars, normalize, guard, protectOnReplace];
 }

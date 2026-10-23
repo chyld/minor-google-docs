@@ -254,3 +254,46 @@ describe('found in review', () => {
     expect(foldedSections(s)).toEqual([0]);
   });
 });
+
+describe('found in review, round 3', () => {
+  const two = 'Title\n## {teal} Setup\nbody one\n## {sky} Logs\nlog line';
+
+  it('two cursors pressing Backspace at body starts merge nothing', () => {
+    const a = at(two, 'body one');
+    const b = at(two, 'log line');
+    const s0 = EditorState.create({ doc: two, selection: EditorSelection.create([EditorSelection.cursor(a), EditorSelection.cursor(b)]), extensions: [EditorState.allowMultipleSelections.of(true), history(), markers(), sections(), highlights(), imageEditing()] });
+    const s = apply(s0, { changes: [{ from: a - 1, to: a }, { from: b - 1, to: b }], userEvent: 'delete.backward' });
+    expect(s.doc.toString()).toBe(two);
+  });
+
+  it('a deletion the highlight rules split still takes the whole markup', () => {
+    const d = 'Title\n=={amber}intro==\n## {teal} Setup\nbody';
+    const from = at(d, 'intro') + 3;
+    const to = at(d, '## {te') + 6;
+    const s = apply(mk(d, from, to), { changes: { from, to }, selection: { anchor: from }, userEvent: 'delete.backward' });
+    expect(s.doc.toString()).not.toContain('al} ');
+    expect(s.doc.toString()).toContain('Setup');
+  });
+
+  it('a replace-all that empties a name leaves no stray markup', () => {
+    const d = 'Title\n## {teal} Setup\nbody';
+    const s = apply(mk(d), { changes: { from: at(d, 'Setup'), to: at(d, 'Setup') + 5, insert: '' }, userEvent: 'input.replace' });
+    expect(s.doc.toString()).toBe('Title\n\nbody');
+  });
+
+  it('undo and redo of a move keep the collapsed state', () => {
+    let s = run(mk(D), (v) => setFolded(v, 0, true));
+    s = run(s, (v) => moveSection(v, 0, 1));
+    expect(foldedSections(s)).toEqual([1]);
+    let back = s;
+    undo({ state: s, dispatch: (tr) => (back = tr.state) });
+    expect(back.doc.toString()).toBe(D);
+    expect(foldedSections(back)).toEqual([0]);
+  });
+
+  it('raw replace-all may change a title-line heading (it is not a section)', () => {
+    const d = '## {teal} Title\n## {sky} Real';
+    const raw = EditorState.create({ doc: d, extensions: [rawEditing()] }).update({ changes: [{ from: 4, to: 8, insert: 'mint' }], userEvent: 'input.replace' }).state;
+    expect(raw.doc.toString()).toBe('## {mint} Title\n## {sky} Real');
+  });
+});
