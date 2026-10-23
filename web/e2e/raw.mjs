@@ -169,6 +169,13 @@ const key = (init) => page.evaluate((init) => window.dispatchEvent(new KeyboardE
   await page.keyboard.press('Control+/');
   await settle();
   check('switching with the colours open returns focus to the note', !(await shown('.hl-menu')) && (await page.evaluate(() => __v.hasFocus)));
+  await page.keyboard.press('Control+/');
+  await select('Raw');
+  await settle();
+  await page.focus('.note-bar button[aria-label="Highlight"]');
+  await page.keyboard.press('Control+/');
+  await settle();
+  check('…and so does switching with focus on the highlight button', await page.evaluate(() => __v.hasFocus));
   await page.keyboard.press('Control+k');
   await page.keyboard.type('raw');
   await settle();

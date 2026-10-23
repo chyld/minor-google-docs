@@ -690,7 +690,7 @@ lines, `=={name}…==` delimiters and the title line are plain, editable text.
   highlight's delimiters (a replace-all would cut images loose; captions and highlighted text are fine),
   and text copied in the rendered view pastes with its highlights (`text/x-notes-raw`).
 - **No colour tools.** The highlight button, floating bar and Ctrl+Shift+H do nothing in raw mode;
-  switching with the colours open closes them and returns focus to the note. Pasted or dropped images
+  switching with the colours open (or focus on their button) closes them and returns focus to the note. Pasted or dropped images
   still upload and insert their marker line. Footer counts include the delimiters (what is on screen).
 - **Shortcut.** Ctrl+/ goes by the character typed (`e.key === '/'`), so it follows the layout (Ctrl+Shift+7
   on German keys, AltGr layouts too) and never takes Ctrl+- or Ctrl+?; ignored while held (key repeat),

@@ -202,12 +202,18 @@
     return { left, top };
   });
 
-  // the raw text has no colours to pick
+  // the raw text has no colours to pick: their button goes away, so focus on it (or in the colours)
+  // goes back to the note instead of the page
+  let wasRaw = untrack(() => app.raw);
   $effect(() => {
-    if (app.raw)
-      untrack(() => {
-        if (hlMenu) closeHighlightMenu(); // focus was in the colours: back to the note
-      });
+    const r = app.raw;
+    untrack(() => {
+      if (r && !wasRaw && (hlMenu || document.activeElement === document.body)) {
+        hlMenu = null;
+        editor?.focus();
+      }
+      wasRaw = r;
+    });
   });
 
   function toggleRaw() {
