@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { EditorState, Annotation } from '@codemirror/state';
-  import { EditorView, keymap, placeholder } from '@codemirror/view';
+  import { EditorState, Annotation, EditorSelection, Transaction, type Line } from '@codemirror/state';
+  import { EditorView, drawSelection, keymap, placeholder } from '@codemirror/view';
   import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
   import { search, searchKeymap } from '@codemirror/search';
   import { markers } from '../lib/editor/markers';
+  import { imageEditing, imageLineRange, imageOp, initialSelection, isImageLine, selectedImage, textPos } from '../lib/editor/images';
   import { stamp } from '../lib/format';
   import { MARKER_RE, markerLine } from '../lib/ids';
 
@@ -20,12 +21,32 @@
   let host: HTMLDivElement;
   let view: EditorView | null = null;
   const external = Annotation.define<boolean>();
+  // whether the user has placed the cursor since this note loaded (attachments go there, else at the end)
+  let touched = false;
+  // Refs whose upload was canceled (null) or re-minted (new ref). Undo/redo can bring their old
+  // markers back from history; those are fixed up again right after.
+  const retired = new Map<string, string | null>();
+
+  function reapplyRetired() {
+    if (!view || !retired.size) return;
+    const doc = view.state.doc;
+    for (let i = 1; i <= doc.lines; i++) {
+      const ref = MARKER_RE.exec(doc.line(i).text)?.[1];
+      if (!ref || !retired.has(ref)) continue;
+      const next = retired.get(ref);
+      if (next) replaceRef(ref, next);
+      else removeMarker(ref);
+      return reapplyRetired(); // positions changed; rescan
+    }
+  }
 
   function extensions(ro: boolean) {
     return [
       history(),
       search({ top: true }),
       markers(),
+      imageEditing(),
+      drawSelection({ drawRangeCursor: false }),
       EditorView.lineWrapping,
       placeholder('Start with a title…'),
       EditorState.readOnly.of(ro),
@@ -35,7 +56,7 @@
         {
           key: 'Alt-t',
           run: (v) => {
-            v.dispatch(v.state.replaceSelection(stamp()));
+            v.dispatch(v.state.replaceSelection(stamp()), { userEvent: 'input' });
             return true;
           },
         },
@@ -46,6 +67,8 @@
       ]),
       EditorView.updateListener.of((u) => {
         if (u.docChanged && !u.transactions.some((t) => t.annotation(external))) onchange(u.state.doc.toString());
+        if (u.transactions.some((t) => t.annotation(Transaction.userEvent))) touched = true;
+        if (u.docChanged && u.transactions.some((t) => t.isUserEvent('undo') || t.isUserEvent('redo'))) queueMicrotask(reapplyRetired);
       }),
       EditorView.domEventHandlers({
         paste(e) {
@@ -79,7 +102,10 @@
   /** Replace the whole document without triggering onchange (loading a note). */
   export function setDoc(text: string, ro = false) {
     if (!view) return;
-    view.setState(EditorState.create({ doc: text, extensions: extensions(ro) }));
+    touched = false;
+    retired.clear(); // a fresh state has no history that could bring old markers back
+    const doc = EditorState.create({ doc: text }).doc;
+    view.setState(EditorState.create({ doc, selection: initialSelection(doc), extensions: extensions(ro) }));
   }
 
   /** Replace content as an edit (undoable, triggers onchange). */
@@ -91,61 +117,118 @@
     return view?.state.doc.toString() ?? '';
   }
 
+  /** Cursor at the end of the note (or the last image selected, if the note ends with one). */
+  function endSelection(st: EditorState): EditorSelection {
+    const last = st.doc.line(st.doc.lines);
+    return isImageLine(last) ? EditorSelection.single(last.from, last.to) : EditorSelection.single(st.doc.length);
+  }
+
   export function focus(atEnd = false) {
     if (!view) return;
     view.focus();
-    if (atEnd) view.dispatch({ selection: { anchor: view.state.doc.length } });
+    if (atEnd) view.dispatch({ selection: endSelection(view.state), annotations: imageOp.of(true) });
   }
 
-  /** Insert marker lines for images on their own lines at pos (or the cursor). */
+  /** Focus for adding attachments: keep the user's cursor if they placed one, else go to the end. */
+  export function focusForInsert() {
+    if (!view) return;
+    view.focus();
+    if (!touched) view.dispatch({ selection: endSelection(view.state), annotations: imageOp.of(true) });
+  }
+
+  /** The line new images go after (or, if empty, in place of): never above the title line. */
+  function insertionLine(st: EditorState, at: 'cursor' | number): Line {
+    const doc = st.doc;
+    let line: Line;
+    if (at !== 'cursor') line = doc.lineAt(at);
+    else {
+      const r = st.selection.main;
+      line = selectedImage(st) ?? doc.lineAt(r.empty ? r.head : r.to);
+    }
+    for (let n = 1; n < line.number; n++) {
+      const l = doc.line(n);
+      if (l.text.trim() !== '' && !isImageLine(l)) return line; // the title is above: fine
+    }
+    // nothing but blank/image lines above: if a title exists below, go after it
+    for (let n = line.number; n <= doc.lines; n++) {
+      const l = doc.line(n);
+      if (l.text.trim() !== '' && !isImageLine(l)) return n === line.number ? line : l;
+    }
+    return line;
+  }
+
+  /** Insert marker lines for images on their own lines, then leave the cursor on a text line below them. */
   export function insertMarkers(items: { ref: string; filename: string }[], at: 'cursor' | number) {
     if (!view || !items.length) return;
     const st = view.state;
-    const pos = at === 'cursor' ? st.selection.main.head : at;
-    const line = st.doc.lineAt(pos);
+    const doc = st.doc;
+    const line = insertionLine(st, at);
     const block = items.map((i) => markerLine(i.ref, i.filename)).join('\n');
-    let from: number, to: number, insert: string;
-    if (line.text.trim() === '') {
+    let from: number, insert: string, cursor: number;
+    if (!isImageLine(line) && line.text.trim() === '') {
+      // a blank line: images go here and the blank line stays below them for typing
       from = line.from;
-      to = line.to;
-      insert = block + (line.to === st.doc.length ? '\n' : '');
-    } else if (pos === line.from) {
-      from = to = line.from;
       insert = block + '\n';
+      cursor = from + insert.length;
     } else {
-      from = to = line.to;
-      insert = '\n' + block + (line.to === st.doc.length ? '\n' : '');
+      from = line.to;
+      insert = '\n' + block;
+      const next = line.number < doc.lines ? doc.line(line.number + 1) : null;
+      if (!next || isImageLine(next)) {
+        insert += '\n'; // a fresh line to type on
+        cursor = from + insert.length;
+      } else cursor = from + insert.length + 1; // start of the existing next line
     }
-    view.dispatch({ changes: { from, to, insert }, selection: { anchor: from + insert.length }, scrollIntoView: true });
+    view.dispatch({
+      changes: { from, insert },
+      selection: { anchor: cursor },
+      scrollIntoView: true,
+      userEvent: 'input.paste',
+      annotations: imageOp.of(true),
+    });
     view.focus();
   }
 
-  /** Remove every marker line for ref (its upload was canceled). */
+  /** Remove every marker line for ref (its upload was canceled). Not undoable: the upload is gone. */
   export function removeMarker(ref: string) {
     if (!view) return;
-    const doc = view.state.doc;
-    const changes = [];
+    retired.set(ref, null);
+    const st = view.state;
+    const doc = st.doc;
+    const ranges: { from: number; to: number }[] = [];
+    let first: Line | null = null;
     for (let i = 1; i <= doc.lines; i++) {
       const line = doc.line(i);
-      if (MARKER_RE.exec(line.text)?.[1] === ref) {
-        const to = line.to < doc.length ? line.to + 1 : line.to;
-        const from = line.to < doc.length || line.from === 0 ? line.from : line.from - 1;
-        changes.push({ from, to });
-      }
+      if (MARKER_RE.exec(line.text)?.[1] !== ref) continue;
+      first ??= line;
+      const r = imageLineRange(doc, line);
+      const prev = ranges[ranges.length - 1];
+      if (prev && r.from <= prev.to) prev.to = Math.max(prev.to, r.to);
+      else ranges.push(r);
     }
-    if (changes.length) view.dispatch({ changes });
+    if (!ranges.length) return;
+    const changes = st.changes(ranges);
+    // if the removed image was selected, land on text rather than on a neighbouring image
+    const sel = selectedImage(st);
+    const target = sel && first && sel.from === first.from ? textPos(doc, first, -1) : null;
+    view.dispatch({
+      changes,
+      selection: target === null ? undefined : { anchor: changes.mapPos(target, -1) },
+      annotations: [imageOp.of(true), Transaction.addToHistory.of(false)],
+    });
   }
 
   /** Rewrite every marker for oldRef (the server rejected the ref as taken). */
   export function replaceRef(oldRef: string, newRef: string) {
     if (!view) return;
+    retired.set(oldRef, newRef);
     const doc = view.state.doc;
     const changes = [];
     for (let i = 1; i <= doc.lines; i++) {
       const line = doc.line(i);
       if (MARKER_RE.exec(line.text)?.[1] === oldRef) changes.push({ from: line.from + 7, to: line.from + 7 + oldRef.length, insert: newRef });
     }
-    if (changes.length) view.dispatch({ changes });
+    if (changes.length) view.dispatch({ changes, annotations: [imageOp.of(true), Transaction.addToHistory.of(false)] });
   }
 </script>
 

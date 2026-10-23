@@ -143,7 +143,8 @@ class AppState {
   upsert(m: Partial<NoteMeta> & { id: string }) {
     const i = this.notes.findIndex((n) => n.id === m.id);
     if (i >= 0) this.notes[i] = { ...this.notes[i], ...m };
-    else if ('title' in m && this.view !== 'trash') this.notes = [m as NoteMeta, ...this.notes];
+    // only a complete, live note may join the list (a partial one would break the cards)
+    else if ('tag_ids' in m && !m.trashed_at && this.view !== 'trash') this.notes = [m as NoteMeta, ...this.notes];
   }
 
   remove(id: string) {

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { api, ApiError } from '../lib/api';
   import { app } from '../lib/state.svelte';
   import { drafts } from '../lib/drafts';
@@ -10,7 +10,7 @@
   import { hue } from '../lib/colors';
   import { menu } from '../lib/a11y';
   import type { NoteSaver, SaveStatus, Conflict } from '../lib/saver';
-  import { anyUnsaved, claimSaver, createSaver, draftAll, existingSaver, forgetSaver, releaseSaver, setLiveEditor, unloadAll } from '../lib/savers';
+  import { anyUnsaved, claimSaver, createSaver, draftAll, existingSaver, fixRetiredRefs, forgetSaver, releaseSaver, setLiveEditor, unloadAll } from '../lib/savers';
   import type { Attachment, Note } from '../lib/types';
   import Editor from './Editor.svelte';
   import TagInput from './TagInput.svelte';
@@ -108,7 +108,8 @@
       registry.seed(n.attachments);
       note = n;
       attOpen = attOpen && n.attachments.length > 0;
-      app.upsert({ id: n.id, title: n.title, preview: n.preview, sha256: n.sha256, attachment_count: n.attachments.length });
+      const { body: _body, attachments: _atts, ...meta } = n;
+      app.upsert({ ...meta, attachment_count: n.attachments.length });
 
       const live = existingSaver(nid);
       if (live && (live.dirty || live.conflict) && !n.trashed_at) {
@@ -141,7 +142,10 @@
       setText(n.body);
       editor?.setDoc(n.body, !!n.trashed_at);
       if (!n.trashed_at) goLive(nid);
-      if (!n.body.trim() && !n.trashed_at) editor?.focus();
+      if (!n.body.trim() && !n.trashed_at) {
+        await tick(); // the editor is still hidden until the DOM catches up with `note`
+        if (seq === loadSeq) editor?.focus();
+      }
     } catch (e) {
       if (seq !== loadSeq) return;
       loadError = e instanceof ApiError && e.status === 404 ? 'This note no longer exists.' : e instanceof Error ? e.message : String(e);
@@ -232,7 +236,14 @@
     if (await patch({ trashed: false })) {
       app.remove(nid);
       app.loadTags();
-      editor.setDoc(pending);
+      // uploads canceled or re-minted while it was in the trash couldn't be saved then
+      const fixed = fixRetiredRefs(pending);
+      editor.setDoc(fixed);
+      goLive(nid); // upload cancels / ref changes must reach the editor again
+      if (fixed !== pending) {
+        setText(fixed);
+        saver?.edit(fixed);
+      }
       app.toast('Restored.', 'success', { label: 'Open', run: () => app.setView('all') });
     }
   }
@@ -299,7 +310,7 @@
     const images = files.filter((f) => INLINE.has(f.type));
     const others = files.filter((f) => !INLINE.has(f.type));
     if (images.length) {
-      editor.focus(true);
+      editor.focusForInsert();
       handleFiles(images, 'cursor');
     }
     for (const f of others) uploads.start(f, f.name || 'file', note!.id, false);

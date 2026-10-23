@@ -100,9 +100,23 @@ async function rewriteNote(noteId: string, fn: (body: string) => string, live: (
   }
 }
 
+// Refs canceled (null) or re-minted (new ref) this session. A trashed note can't be saved, so
+// its markers are fixed up when it is restored (fixRetiredRefs).
+const retiredRefs = new Map<string, string | null>();
+
+/** Apply this session's canceled/re-minted refs to a body. */
+export function fixRetiredRefs(body: string): string {
+  for (const [ref, next] of retiredRefs) body = next ? swapRef(body, ref, next) : stripMarker(body, ref);
+  return body;
+}
+
 // A canceled upload's marker goes away; a re-minted ref is rewritten — in
 // whichever note it was pasted into, open or not.
-uploads.onCancel((noteId, ref) => void rewriteNote(noteId, (b) => stripMarker(b, ref), (e) => e.removeMarker(ref)));
-uploads.onRefChange((noteId, oldRef, newRef) =>
-  void rewriteNote(noteId, (b) => swapRef(b, oldRef, newRef), (e) => e.replaceRef(oldRef, newRef)),
-);
+uploads.onCancel((noteId, ref) => {
+  retiredRefs.set(ref, null);
+  void rewriteNote(noteId, (b) => stripMarker(b, ref), (e) => e.removeMarker(ref));
+});
+uploads.onRefChange((noteId, oldRef, newRef) => {
+  retiredRefs.set(oldRef, newRef);
+  void rewriteNote(noteId, (b) => swapRef(b, oldRef, newRef), (e) => e.replaceRef(oldRef, newRef));
+});

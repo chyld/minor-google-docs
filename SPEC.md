@@ -526,3 +526,65 @@ mobile apps, OAuth/SSO/2FA, encryption at rest, admin web UI, API tokens / quick
    list, palette · (f) editor: CodeMirror, markers, paste flow, drafts, conflict bar.
 3. **Alpha:** integrate, `docker compose up`, run E2E.
 4. **Beta:** cross-review each piece by a different model.
+
+## 17. Editing around inline images
+
+Images are text lines `[image:<ref>] caption` drawn as block widgets (`web/src/lib/editor/markers.ts`).
+The editing rules live in `web/src/lib/editor/images.ts`. The model: an image is a block; the cursor
+only ever sits on text lines; an image is reached as an **image selection** (its whole line selected,
+outlined in the accent colour); image lines change only as whole lines.
+
+**17.1 Geometry.** Block widgets carry no vertical margin (CodeMirror's height map cannot see it — that
+was the cause of arrow keys skipping lines); spacing is padding inside `.cm-img`. Each widget watches its
+own size with a `ResizeObserver` and calls `view.requestMeasure()`, so late image loads never leave the
+height map stale. Natural image sizes are cached per ref for `aspect-ratio`/`estimatedHeight`.
+`drawSelection({drawRangeCursor:false})` draws the caret, so it is visible wherever the cursor is.
+
+**17.2 Guard** (`transactionFilter`, user transactions only). For every image line a change touches:
+- removed as part of a larger deletion → allowed; exactly its hidden text removed (cut) → one newline
+  goes with it, so no blank line is left;
+- exactly its text replaced by text (typing, IME commit, mobile insert, Alt-T, paste over a selected
+  image) → the image is kept and the text goes on a new line after it;
+- text replacing a range that ends at the image's start or begins at its end (typing over a
+  triple-clicked line above it) → a newline is added so the text keeps its own line;
+- anything else (joining it with a non-empty neighbour, partial edits, indent, text glued to either end)
+  → the transaction is refused. Joins with an *empty* neighbour line are fine.
+Replace-all skips image lines (`changeFilter`). Pasted text that starts/ends with a marker line gets that
+line on its own (`clipboardInputFilter`). Our own structural edits carry the `imageOp` annotation.
+
+**17.3 Selection.** A cursor that lands on an image line becomes that image's selection when a person
+caused it (click, keys, delete) and moves to the nearest text line otherwise (programmatic edits, upload
+cancel). A range ending inside an image's hidden text grows to the whole line — except search matches,
+which stay as they are so Find/Replace can step past a caption; the first editing key on such a match
+selects the image instead of editing (so Backspace after Find never deletes it). New states
+(`setDoc`) start on text; an update listener corrects paths that bypass filters (undo/redo).
+
+**17.4 Keys** (one `Prec.highest` keydown handler; edits are no-ops in read-only notes).
+
+| Key | Cursor on a text line | Image selected |
+|---|---|---|
+| ↑ / ↓ | Leaving the line towards an adjacent image selects it; otherwise normal | Previous/next image is selected, or the cursor goes to the end/start of the text line |
+| ← / → | At line start/end next to an image: select it | Same as ↑ / ↓ |
+| Backspace / Delete | At the boundary of a non-empty line: select the image (no delete). Empty line: removed normally | Delete the image (+ one newline); cursor to the nearest text line |
+| Held Backspace/Delete (key repeat) | Never selects or deletes an image | Never deletes |
+| Enter / Shift+Enter | normal | New empty line below / above the image |
+| Space | normal | Open the image |
+| Escape | normal | Cursor to the next text line |
+| Typing / IME / mobile input | normal | First a new line is made after the image, then the input lands there (Alt+key shortcuts don't count as typing, except on macOS) |
+| Mobile Backspace (input event) | normal | Delete the image |
+
+**17.5 Mouse.** Clicking an image selects it; clicking the selected image opens the lightbox (on `click`,
+not `mousedown`, so the release can't hit the lightbox scrim). Shift-click extends the selection to the
+image. In the trash (read-only) a single click opens it, and images are keyboard-focusable buttons.
+Focus never moves into the widget, so closing the lightbox returns focus to the editor.
+
+**17.6 Inserting images** (paste/drop/attach). After the image block the cursor is on a text line: an
+empty line the images were pasted on stays below them; otherwise the start of the following text line,
+or a new empty line at the end of the note / before another image. Never above the title. With an image
+selected, new images go after it. The attach button keeps the cursor the user placed (end of note if none).
+
+**17.7 Known limitations.** Captions (file names) are not editable. Notes already corrupted by the old bug
+are not repaired automatically. Mobile is verified in desktop Chromium only.
+
+**17.8 Tests.** `web/src/lib/editor/images.test.ts` (state-level rules). `web/e2e/images.mjs` drives a
+real browser against a running server (`PW=<playwright> BASE=… USER_NAME=… PASS=… node web/e2e/images.mjs`).

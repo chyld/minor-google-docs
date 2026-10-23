@@ -1,11 +1,21 @@
 // CodeMirror extension: renders `[image:<ref>] caption` lines as inline images
-// (block widgets, atomic so the cursor skips them and Backspace removes the line),
-// and styles the first text line as the note title.
+// (block widgets, atomic), and styles the first text line as the note title.
+// Editing rules for image lines live in images.ts.
 import { EditorState, type Extension, RangeSet, StateField, type Range, type Transaction } from '@codemirror/state';
 import { Decoration, type DecorationSet, EditorView, WidgetType } from '@codemirror/view';
 import { MARKER_RE } from '../ids';
 import { attachmentURL } from '../api';
 import { registry, type RefState } from '../registry';
+import { openLightbox, selectImage, selectedImage } from './images';
+
+// Natural image sizes seen this session, so a re-created widget gets its box right before load.
+const sizes = new Map<string, { w: number; h: number }>();
+function rememberSize(ref: string, img: HTMLImageElement) {
+  if (!img.naturalWidth || !img.naturalHeight) return;
+  sizes.delete(ref); // most recently used last
+  if (sizes.size >= 500) sizes.delete(sizes.keys().next().value!);
+  sizes.set(ref, { w: img.naturalWidth, h: img.naturalHeight });
+}
 
 class ImageWidget extends WidgetType {
   constructor(
@@ -20,14 +30,30 @@ class ImageWidget extends WidgetType {
   }
 
   get estimatedHeight() {
-    return 220;
+    const s = sizes.get(this.ref);
+    if (!s) return 220;
+    return Math.min(520, (680 * s.h) / s.w) + (this.caption ? 22 : 0) + 22;
   }
 
-  toDOM(): HTMLElement {
+  toDOM(view: EditorView): HTMLElement {
     const fig = document.createElement('figure');
     fig.className = 'cm-img';
     fig.setAttribute('contenteditable', 'false');
+    fig.setAttribute('role', 'img');
+    fig.setAttribute('aria-label', this.caption || 'image');
+
+    // Pending uploads update progress in place instead of rebuilding the DOM on every tick.
+    let ring: HTMLElement | null = null;
+    let pendingURL = '';
     const render = (s: RefState) => {
+      if (s.kind === 'pending' && ring && s.url === pendingURL) {
+        ring.style.setProperty('--p', String(Math.round(s.progress * 100)));
+        ring.textContent = s.error ? '!' : `${Math.round(s.progress * 100)}%`;
+        fig.dataset.state = s.error ? 'error' : 'pending';
+        return;
+      }
+      ring = null;
+      pendingURL = '';
       fig.replaceChildren();
       fig.dataset.state = s.kind;
       if (s.kind === 'loading') {
@@ -37,35 +63,35 @@ class ImageWidget extends WidgetType {
         box.textContent = `Image not found · ${this.caption || this.ref}`;
         fig.append(box);
       } else {
-        const btn = el('button', 'cm-img-frame') as HTMLButtonElement;
-        btn.type = 'button';
-        btn.title = 'Open image';
+        if (s.kind === 'ready' && !s.att.inline) {
+          const box = el('div', 'cm-img-missing');
+          box.textContent = `Not an image · ${s.att.filename}`;
+          fig.append(box);
+          return;
+        }
+        const frame = el('div', 'cm-img-frame');
         const img = document.createElement('img');
         img.alt = this.caption || 'image';
-        img.loading = 'lazy';
         img.decoding = 'async';
+        img.draggable = false;
+        const known = sizes.get(this.ref);
+        if (known) img.style.aspectRatio = `${known.w} / ${known.h}`;
+        img.onload = () => rememberSize(this.ref, img);
         if (s.kind === 'pending') {
           img.src = s.url;
-          const ring = el('div', 'cm-img-progress');
-          ring.style.setProperty('--p', String(Math.round(s.progress * 100)));
-          ring.textContent = s.error ? '!' : `${Math.round(s.progress * 100)}%`;
-          btn.append(img, ring);
-          if (s.error) fig.dataset.state = 'error';
+          ring = el('div', 'cm-img-progress');
+          pendingURL = s.url;
+          frame.append(img, ring);
+          render(s);
         } else {
-          if (!s.att.inline) {
-            const box = el('div', 'cm-img-missing');
-            box.textContent = `Not an image · ${s.att.filename}`;
-            fig.append(box);
-            return;
-          }
           img.src = attachmentURL(s.att.id);
           img.onerror = () => {
             fig.dataset.state = 'broken';
           };
-          btn.append(img);
-          btn.onclick = () => window.dispatchEvent(new CustomEvent('notes:lightbox', { detail: { ref: this.ref } }));
+          frame.title = 'Click to select · click again to open';
+          frame.append(img);
         }
-        fig.append(btn);
+        fig.append(frame);
         if (this.caption) {
           const cap = el('figcaption', 'cm-img-caption');
           cap.textContent = this.caption;
@@ -73,12 +99,65 @@ class ImageWidget extends WidgetType {
         }
       }
     };
-    (fig as any)._unsub = registry.subscribe(this.ref, render);
+    const unsub = registry.subscribe(this.ref, render);
+
+    // Report size changes (image load, state swaps) so CodeMirror's height map stays true.
+    let last = '';
+    const ro = new ResizeObserver(([entry]) => {
+      const size = `${entry.contentRect.width}x${entry.contentRect.height}`;
+      if (size === last) return;
+      last = size;
+      if (!view.dom.isConnected) return;
+      view.requestMeasure();
+    });
+    ro.observe(fig);
+
+    // Mouse: first click selects the image, a click on the selected image opens it.
+    // In read-only mode a click opens it straight away.
+    let wasSelected = false;
+    let down: { x: number; y: number } | null = null;
+    const lineHere = () => view.state.doc.lineAt(view.posAtDOM(fig));
+    fig.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      const line = lineHere();
+      if (e.shiftKey && !view.state.readOnly) {
+        e.preventDefault();
+        const a = view.state.selection.main.anchor;
+        view.focus();
+        view.dispatch({ selection: { anchor: a, head: a <= line.from ? line.to : line.from }, userEvent: 'select.pointer' });
+        return;
+      }
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      e.preventDefault();
+      down = { x: e.clientX, y: e.clientY };
+      const sel = selectedImage(view.state);
+      wasSelected = !!sel && sel.from === line.from;
+      if (view.state.readOnly) return;
+      view.focus();
+      if (!wasSelected) selectImage(view, line, 'select.pointer');
+    });
+    fig.addEventListener('click', (e) => {
+      if (e.button !== 0 || !down) return;
+      const moved = Math.abs(e.clientX - down.x) + Math.abs(e.clientY - down.y) > 6;
+      down = null;
+      if (!moved && (wasSelected || view.state.readOnly)) openLightbox(this.ref);
+    });
+    fig.addEventListener('keydown', (e) => {
+      if (view.state.readOnly && (e.key === 'Enter' || e.key === ' ')) {
+        e.preventDefault();
+        openLightbox(this.ref);
+      }
+    });
+
+    (fig as any)._cleanup = () => {
+      unsub();
+      ro.disconnect();
+    };
     return fig;
   }
 
   destroy(dom: HTMLElement) {
-    (dom as any)._unsub?.();
+    (dom as any)._cleanup?.();
   }
 
   ignoreEvent() {

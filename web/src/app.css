@@ -1280,8 +1280,10 @@ input:focus {
   background: var(--mark-strong);
 }
 
+/* Block widget: no vertical margin (CodeMirror's height map can't see it); spacing is padding. */
 .cm-img {
-  margin: 10px 0;
+  margin: 0;
+  padding: 10px 0;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -1296,8 +1298,30 @@ input:focus {
   border: 1px solid var(--border);
   background: var(--surface-2);
   box-shadow: var(--shadow);
+  cursor: pointer;
+  transition: transform var(--fast), box-shadow var(--fast), outline-color var(--fast);
+  outline: 3px solid transparent;
+  outline-offset: 2px;
+}
+.cm-img.selected .cm-img-frame {
+  outline-color: color-mix(in oklch, var(--accent) 45%, transparent);
   cursor: zoom-in;
-  transition: transform var(--fast), box-shadow var(--fast);
+}
+.cm-editor.cm-focused .cm-img.selected .cm-img-frame {
+  outline-color: var(--accent);
+}
+.cm-img,
+.cm-img * {
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+.cm-img ::selection {
+  background: transparent;
+}
+.cm-img[role='button']:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius);
 }
 .cm-img-frame:hover {
   transform: translateY(-1px);
@@ -1306,6 +1330,7 @@ input:focus {
 .cm-img-frame img {
   display: block;
   max-width: 100%;
+  height: auto;
   max-height: 520px;
   object-fit: contain;
 }
