@@ -709,14 +709,14 @@ layouts, attachments, clipboard, counts, undo, focus, trashed notes, phone toolb
 
 ## 21. End of note
 
-A small wave (`∿`, an inline SVG so it looks the same on every device) is drawn centred under the last
-line of every note with text, so it's clear nothing more follows, for example after a final image or
+A small asterism (`⁂`, three dots in a triangle, an inline SVG so it looks the same on every device)
+is drawn centred under the last line of every note with text, so it's clear nothing more follows, for example after a final image or
 blank lines.
 
 - **Not text.** It sits outside the editor (`.note-end` in `NoteView.svelte`), is `aria-hidden`, and can't
   be selected, copied, searched or saved.
-- **Colour.** The note's accent hue (first tag; violet by default) at reduced opacity, in both themes;
-  full-strength `GrayText` in forced-colours mode.
+- **Colour.** Neutral grey (`--muted`, faded) in both themes, whatever the note's tags, so it never
+  competes with section or tag colours. Full-strength `GrayText` in forced-colours mode.
 - **Click.** A plain left click (or tap) on it, or on the empty space under the note in line with the
   text (anywhere down to the bottom of the scroll area, not the side margins), puts the cursor at the
   end of the note: `focus(true)`, so in the rendered view a note ending with an image selects that image
@@ -748,17 +748,16 @@ A note can be divided into named, coloured sections. Design reviewed by the beta
   `internal/core/testdata/sections.json`.
 - **Look.**
   - The heading shows only the name: semibold, 1.2em, in the hue (`--sec-l`/`--sec-c`, contrast-tested
-    ≥ 4.5:1 per hue in both themes against `--bg` and `--surface`), with a thin rule. Space above comes
-    from padding, so the height map stays exact.
+    ≥ 4.5:1 per hue in both themes against `--bg` and `--surface`). There's no horizontal rule: the
+    vertical bar carries the colour. Space above comes from padding, so the height map stays exact.
   - Body lines keep normal ink, with no tint, so same-hue highlights stay visible.
   - A 3px bar in the hue runs down the body, from the line after the heading to the last non-blank
     line. It is drawn as a CodeMirror layer, so it continues past image widgets.
   - `## {colour} ` is hidden and atomic. It shows dimmed when the selection touches the heading. It is
     frozen while the mouse is down, like highlight delimiters.
-  - "Strong" (`-deep`) colours look different: deeper ink (`--sec-deep-l`/`--sec-deep-c`, also
-    contrast-tested), heavier weight, a 2px rule and a 5px fully opaque bar.
-  - Forced colours: `CanvasText` heading, rule (a real border there: background images are dropped)
-    and bar.
+  - "Strong" (`-deep`) colours differ by heading text only: deeper ink (`--sec-deep-l`/`--sec-deep-c`,
+    also contrast-tested) and heavier weight. Every bar is the same 3px.
+  - Forced colours: `CanvasText` heading and bar.
   - A heading on the title line is not a section. The editor shows it as the title with its markup;
     the server's derived title strips the markup. This is accepted: insertion never puts one there.
 - **Heading controls.**

@@ -1,4 +1,4 @@
-// Browser checks for the end-of-note wave (SPEC.md §21).
+// Browser checks for the end-of-note mark (SPEC.md §21).
 //   PW=/path/to/node_modules/playwright BASE=http://127.0.0.1:4500 USER_NAME=tester PASS=... node web/e2e/endmark.mjs
 import { BASE, check, finish, makeNote, open, page } from './helpers.mjs';
 
@@ -12,7 +12,7 @@ const box = () => page.evaluate((m) => document.querySelector(m).getBoundingClie
 // ---- shown under the text, not part of it ----
 const id = await makeNote(['Wave check', 'first line', 'last line']);
 await open(id);
-check('a note with text ends with the wave', await shown());
+check('a note with text ends with the end mark', await shown());
 check('it sits below the last line', await page.evaluate((m) => {
   const lines = document.querySelectorAll('.cm-line');
   return document.querySelector(m).getBoundingClientRect().top >= lines[lines.length - 1].getBoundingClientRect().bottom;
@@ -21,9 +21,10 @@ check('it is hidden from screen readers and outside the editor', await page.eval
   const e = document.querySelector(m);
   return e.getAttribute('aria-hidden') === 'true' && !e.closest('.cm-editor');
 }, mark));
-check('it is drawn in the note colour, faded', await page.evaluate((m) => {
+check('it is three faded grey dots', await page.evaluate((m) => {
   const s = getComputedStyle(document.querySelector(`${m} svg`));
-  return s.stroke !== 'none' && Number(s.opacity) < 1;
+  const muted = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim();
+  return document.querySelectorAll(`${m} circle`).length === 3 && s.fill !== 'none' && Number(s.opacity) < 1 && !!muted;
 }, mark));
 
 await page.evaluate(() => __v.focus());
@@ -35,20 +36,29 @@ check('…and the saved text has nothing extra', (await page.evaluate(async (id)
 // the colour follows the note's first tag
 const tagged = await page.evaluate(async (id) => {
   const H = { 'X-Requested-With': 'notes', 'Content-Type': 'application/json' };
-  const t = await (await fetch('/api/tags', { method: 'POST', headers: H, body: JSON.stringify({ name: `wave-${Date.now()}`, color: 'coral' }) })).json();
+  const t = await (await fetch('/api/tags', { method: 'POST', headers: H, body: JSON.stringify({ name: `endmark-${Date.now()}`, color: 'coral' }) })).json();
   await fetch(`/api/notes/${id}`, { method: 'PATCH', headers: H, body: JSON.stringify({ tag_ids: [t.id ?? t.tag?.id] }) });
   return true;
 }, id);
 await open(id);
 const hues = await page.evaluate((m) => ({ h: getComputedStyle(document.querySelector('.note')).getPropertyValue('--accent-h').trim(), stroke: getComputedStyle(document.querySelector(`${m} svg`)).stroke }), mark);
-check("with a tag, the wave takes the tag's hue", tagged && hues.h !== '295' && hues.stroke.includes(` ${hues.h})`), hues);
+const fillTagged = await page.evaluate((m) => getComputedStyle(document.querySelector(`${m} svg`)).fill, mark);
+const fillPlain = await page.evaluate(() => {
+  const e = document.createElement('div');
+  e.style.color = 'var(--muted)';
+  document.body.append(e);
+  const c = getComputedStyle(e).color;
+  e.remove();
+  return c;
+});
+check('with a tag, it stays neutral grey (not the tag colour)', tagged && hues.h !== '295' && fillTagged === fillPlain, { hues, fillTagged, fillPlain });
 
 // ---- clicking it, or the empty page below, goes to the end ----
 await page.evaluate(() => __v.dispatch({ selection: { anchor: 0 } }));
 const b = await box();
 await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
 await settle();
-check('clicking the wave puts the cursor at the end', await page.evaluate(() => __v.hasFocus && __v.state.selection.main.head === __v.state.doc.length));
+check('clicking the end mark puts the cursor at the end', await page.evaluate(() => __v.hasFocus && __v.state.selection.main.head === __v.state.doc.length));
 await page.keyboard.type('!');
 check('…so typing continues the last line', (await doc()).endsWith('last line!'), await doc());
 
@@ -98,7 +108,7 @@ const hostBox = () => page.evaluate(() => document.querySelector('.editor-host')
   await page.mouse.click(wb.x + wb.width / 2, wb.y + wb.height / 2);
   await page.keyboard.up('Shift');
   await settle();
-  check('Shift+click on the wave extends the selection to the end', await page.evaluate(() => {
+  check('Shift+click on the end mark extends the selection to the end', await page.evaluate(() => {
     const r = __v.state.selection.main;
     return r.anchor === 3 && r.head === __v.state.doc.length;
   }), await sel());
@@ -141,7 +151,7 @@ await open(imgNote);
 const ib = await box();
 await page.mouse.click(ib.x + ib.width / 2, ib.y + ib.height / 2);
 await settle();
-check('after a final image, clicking the wave selects the image', await page.evaluate(() => {
+check('after a final image, clicking the end mark selects the image', await page.evaluate(() => {
   const r = __v.state.selection.main;
   return __v.state.sliceDoc(r.from, r.to).startsWith('[image:') && r.to === __v.state.doc.length;
 }));
@@ -154,14 +164,14 @@ await settle();
 const rb = await box();
 await page.mouse.click(rb.x + rb.width / 2, rb.y + rb.height / 2);
 await settle();
-check('raw text: clicking the wave puts the cursor at the very end', await page.evaluate(() => __v.state.selection.main.empty && __v.state.selection.main.head === __v.state.doc.length));
+check('raw text: clicking the end mark puts the cursor at the very end', await page.evaluate(() => __v.state.selection.main.empty && __v.state.selection.main.head === __v.state.doc.length));
 await page.keyboard.press('Control+/');
 
-// trashed notes show the wave, but clicking it does nothing
+// trashed notes show the end mark, but clicking it does nothing
 const trashed = await makeNote(['Old note', 'body text']);
 await page.evaluate(async (id) => fetch(`/api/notes/${id}`, { method: 'PATCH', headers: { 'X-Requested-With': 'notes', 'Content-Type': 'application/json' }, body: JSON.stringify({ trashed: true }) }), trashed);
 await open(trashed);
-check('a trashed note shows the wave', await shown());
+check('a trashed note shows the end mark', await shown());
 await page.evaluate(() => __v.dispatch({ selection: { anchor: 2 } }));
 const tb = await box();
 await page.mouse.click(tb.x + tb.width / 2, tb.y + tb.height / 2);
@@ -171,7 +181,7 @@ check('…clicking it there does nothing (read-only)', (await page.evaluate(() =
 // ---- not on an empty note; in raw text too ----
 const empty = await makeNote(['']);
 await open(empty);
-check('an empty note shows no wave', !(await shown()));
+check('an empty note shows no end mark', !(await shown()));
 await page.evaluate(() => __v.focus());
 await page.keyboard.type('Now a title');
 await settle();
@@ -185,7 +195,7 @@ await page.keyboard.press('Control+/');
 await page.emulateMedia({ colorScheme: 'dark' });
 await page.evaluate(() => (document.documentElement.dataset.theme = 'dark'));
 await settle();
-check('dark theme: still drawn', await page.evaluate((m) => getComputedStyle(document.querySelector(`${m} svg`)).stroke !== 'none', mark));
+check('dark theme: still drawn', await page.evaluate((m) => getComputedStyle(document.querySelector(`${m} svg`)).fill !== 'none', mark));
 await page.setViewportSize({ width: 390, height: 800 });
 await open(id);
 check('phones: shown, centred', await page.evaluate((m) => {

@@ -1245,13 +1245,11 @@ input:focus {
   letter-spacing: -0.01em;
   padding: 0.85em 0 3px !important; /* space above via padding: the height map stays exact */
   color: oklch(var(--sec-l) var(--sec-c) var(--h));
-  background: linear-gradient(oklch(var(--dot-l) var(--dot-c) var(--h) / 0.5), oklch(var(--dot-l) var(--dot-c) var(--h) / 0.5)) no-repeat 0 100% / 100% 1px;
 }
 .cm-sec-head.deep {
-  /* "strong" colours: deeper ink, a heavier rule (and a heavier bar below) */
+  /* "strong" colours: deeper, bolder heading ink (the bar is the same 3px for every section) */
   font-weight: 760;
   color: oklch(var(--sec-deep-l) var(--sec-deep-c) var(--h));
-  background: linear-gradient(oklch(var(--dot-l) var(--dot-c) var(--h)), oklch(var(--dot-l) var(--dot-c) var(--h))) no-repeat 0 100% / 100% 2px;
 }
 .cm-sec-head .sec-delim {
   font-weight: 450;
@@ -1333,10 +1331,6 @@ input:focus {
   background: oklch(var(--dot-l) var(--dot-c) var(--h));
   opacity: 0.75;
 }
-.cm-sec-bar.deep {
-  width: 5px;
-  opacity: 1;
-}
 .sec-h-25 {
   --h: 25;
 }
@@ -1401,8 +1395,6 @@ input:focus {
 @media (forced-colors: active) {
   .cm-sec-head {
     color: CanvasText;
-    background: none;
-    border-bottom: 1px solid CanvasText; /* background images are dropped in forced colours */
   }
   .cm-sec-bar {
     background: CanvasText;
@@ -1419,18 +1411,16 @@ input:focus {
   user-select: none;
 }
 .note-end svg {
-  fill: none;
-  stroke: oklch(var(--dot-l) var(--dot-c) var(--accent-h));
-  stroke-width: 1.6;
-  stroke-linecap: round;
-  opacity: 0.55;
+  /* three dots (an asterism ⁂) in a quiet grey: never competes with section or tag colours */
+  fill: var(--muted);
+  opacity: 0.7;
 }
 .note.trashed .note-end {
   cursor: default;
 }
 @media (forced-colors: active) {
   .note-end svg {
-    stroke: GrayText;
+    fill: GrayText;
     opacity: 1;
   }
 }
