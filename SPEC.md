@@ -779,19 +779,24 @@ A note can be divided into named, coloured sections. Design reviewed by the beta
   - Add, recolour, remove and move are each one undo step.
   - Replace-all never rewrites the markup, in the rendered view or in raw text (§20).
 - **Moving.** Move up/down swaps the whole section (heading to the line before the next heading) with
-  its neighbour. The text before the first section never moves. The cursor and collapsed state travel
-  with it.
+  its neighbour. The text before the first section never moves. The cursor, in either of the two
+  swapped sections, and their collapsed state travel with them.
 - **Collapsing.**
   - Folds the body (heading end → last non-blank line) behind a "⋯ N lines" button.
   - Kept per note in this browser (`notes.folds.<user>:<note>`, section indexes), never in the file.
     Restored when the note opens and when leaving raw text.
-  - The cursor or a Find match landing inside opens it (CodeMirror clears folds the selection enters).
-    Raw text shows everything.
+  - Kept by the editor itself (`setDoc(text, ro, key)`): restored when the note opens and when
+    leaving raw text, and never overwritten by the reconfigure in between.
+  - The cursor or any selection reaching into the body opens it, including a Find match that ends at
+    the body's last character. The saved state follows. A cursor at the heading's end leaves it
+    collapsed. Removing a collapsed section opens it first. Raw text shows everything.
 - **Section list.**
   - The note-bar "Sections" button (desktop; shown when there are sections) and the ⋯ menu's "Sections"
     list every section with its colour dot. Picking one puts the cursor on the heading, opening it if
     collapsed, and scrolls it to the top.
-  - The palette has "Go to section: …" for each. This is also the screen-reader navigation path:
+  - The palette has "Go to section: …" for each, and "Section options", which opens the menu of the
+    section the cursor is in, for keyboard use. The heading's own buttons are mouse/touch only.
+  - Section popovers close when another note opens. This is also the screen-reader navigation path:
     CodeMirror lines aren't real headings. Moving onto a heading announces "Section, colour, name".
 - **Elsewhere.**
   - Copy: other apps get the name (`text/plain`); this app keeps the heading (`text/x-notes-raw`).

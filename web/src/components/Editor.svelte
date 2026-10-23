@@ -7,7 +7,7 @@
   import { markers } from '../lib/editor/markers';
   import { rawEditing } from '../lib/editor/raw';
   import { foldEffect, unfoldEffect } from '@codemirror/language';
-  import { type SectionInfo, foldedSections, gotoSection, insertSection, isFolded, moveSection, recolorSection, removeSection, restoreFolds, sections, sectionsOf, setFolded } from '../lib/editor/sections';
+  import { type SectionInfo, foldedSections, gotoSection, insertSection, isFolded, moveSection, recolorSection, removeSection, restoreFolds, sectionAt, sections, sectionsOf, setFolded } from '../lib/editor/sections';
   import { isHeadingLine } from '../lib/heading';
   import { imageEditing, imageLineRange, imageOp, initialSelection, isImageLine, selectedImage, textPos } from '../lib/editor/images';
   import { applyHighlight, highlightAt, highlights, type HighlightInfo } from '../lib/editor/highlights';
@@ -99,7 +99,7 @@
           queueMicrotask(recheckSelection); // history restores cursors without the edit rules
         }
         if (u.selectionSet || u.docChanged || u.focusChanged || u.geometryChanged) report();
-        if (u.docChanged || u.startState.facet(EditorState.readOnly) !== u.state.facet(EditorState.readOnly) || u.transactions.some((t) => t.reconfigured || t.effects.some((e) => e.is(foldEffect) || e.is(unfoldEffect)))) reportSections();
+        if (u.docChanged || u.selectionSet || u.startState.facet(EditorState.readOnly) !== u.state.facet(EditorState.readOnly) || u.transactions.some((t) => t.reconfigured || t.effects.some((e) => e.is(foldEffect) || e.is(unfoldEffect)))) reportSections();
       }),
       EditorView.domEventHandlers({
         paste(e) {
@@ -157,19 +157,26 @@
   $effect(() => {
     const r = raw;
     if (!view || rich.get(view.state) === (r ? rawExt : richExt)) return;
+    restoring = true; // the reconfigure drops collapsed sections; they come back below, not forgotten
     view.dispatch({ effects: [rich.reconfigure(richExtensions()), EditorView.announce.of(r ? 'Raw text' : 'Rendered note')] });
+    restoring = false;
+    if (!r) restoreSavedFolds();
+    reportSections();
     recheckSelection();
     report();
   });
 
   /** Replace the whole document without triggering onchange (loading a note). */
-  export function setDoc(text: string, ro = false) {
+  export function setDoc(text: string, ro = false, folds: string | null = null) {
     if (!view) return;
+    foldsKey = folds;
     touched = false;
     retired.clear(); // a fresh state has no history that could bring old markers back
     const doc = EditorState.create({ doc: text }).doc;
     const selection = untrack(() => raw) ? EditorSelection.single(0) : initialSelection(doc);
     view.setState(EditorState.create({ doc, selection, extensions: extensions(ro) }));
+    lastSections = '';
+    restoreSavedFolds();
     reportSections();
   }
 
@@ -194,15 +201,38 @@
 
   // ---- sections ----
 
+  // collapsed sections are remembered per note in this browser (never in the file), under foldsKey
+  let foldsKey: string | null = null;
+  let restoring = false;
   let lastSections = '';
+
+  function restoreSavedFolds() {
+    if (!view || !foldsKey || untrack(() => raw)) return;
+    let saved: number[] = [];
+    try {
+      const v = JSON.parse(localStorage.getItem(foldsKey) ?? '[]');
+      if (Array.isArray(v)) saved = v.filter((x) => Number.isInteger(x));
+    } catch {
+      /* ignore a bad entry */
+    }
+    restoring = true;
+    restoreFolds(view, saved);
+    restoring = false;
+  }
+
   function reportSections() {
-    if (!view || !onsections) return;
+    if (!view || restoring) return;
     const st = view.state;
-    const list: SectionInfo[] = untrack(() => raw) ? [] : sectionsOf(st).map((s) => ({ name: s.name, color: s.color, folded: isFolded(st, s), foldable: s.bodyEnd > s.headTo }));
+    const isRaw = untrack(() => raw);
+    const list: SectionInfo[] = isRaw ? [] : sectionsOf(st).map((s) => ({ name: s.name, color: s.color, folded: isFolded(st, s), foldable: s.bodyEnd > s.headTo }));
     const key = JSON.stringify(list);
     if (key === lastSections) return;
     lastSections = key;
-    onsections(list);
+    onsections?.(list);
+    if (isRaw || !foldsKey || st.readOnly) return;
+    const folded = foldedSections(st);
+    if (folded.length) localStorage.setItem(foldsKey, JSON.stringify(folded));
+    else localStorage.removeItem(foldsKey);
   }
 
   /** Start a section after the cursor's line, in this colour (the name is selected for typing). */
@@ -230,12 +260,14 @@
   export function sectionFold(index: number, fold: boolean) {
     if (view) setFolded(view, index, fold);
   }
-  /** Indexes of collapsed sections, and restoring them (kept per note by the parent). */
-  export function getFolds(): number[] {
-    return view && !untrack(() => raw) ? foldedSections(view.state) : [];
-  }
-  export function setFolds(indexes: number[]) {
-    if (view && !untrack(() => raw)) restoreFolds(view, indexes);
+  /** Open the menu of the section the cursor is in (keyboard access); false if it's in none. */
+  export function openSectionMenu(): boolean {
+    if (!view || untrack(() => raw)) return false;
+    const s = sectionAt(view.state, view.state.selection.main.head);
+    const c = s && view.coordsAtPos(s.headTo);
+    if (!s || !c) return false;
+    view.dom.dispatchEvent(new CustomEvent('notes:section-menu', { bubbles: true, detail: { index: s.index, rect: { left: c.left, top: c.top, bottom: c.bottom, right: c.right } } }));
+    return true;
   }
 
   /** Tell the parent about the selection again (e.g. after its scroll container moved). */

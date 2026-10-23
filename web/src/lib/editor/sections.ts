@@ -4,6 +4,7 @@
 // when it shows dimmed. The title line is never a section.
 import {
   Annotation,
+  ChangeSet,
   EditorSelection,
   EditorState,
   RangeSet,
@@ -192,6 +193,20 @@ export function restoreFolds(view: EditorView, indexes: number[]) {
   const effects = sectionsOf(view.state).flatMap((s) => foldEffects(view.state, s, want.has(s.index)));
   if (effects.length) view.dispatch({ effects, annotations: sectionOp.of(true) });
 }
+
+// a selection reaching into a collapsed body opens it (CodeMirror only opens one the cursor lands
+// strictly inside, so a Find match ending at the body's end would stay hidden)
+const openOnSelect = EditorState.transactionExtender.of((tr) => {
+  if (!tr.selection) return null;
+  const folded = foldedRanges(tr.startState).map(tr.changes);
+  const effects: StateEffect<unknown>[] = [];
+  for (const r of tr.newSelection.ranges) {
+    folded.between(r.from, r.to, (f, t) => {
+      if (r.empty ? f < r.head && r.head <= t : f < r.to && t > r.from) effects.push(unfoldEffect.of({ from: f, to: t }));
+    });
+  }
+  return effects.length ? { effects } : null;
+});
 
 const folding = codeFolding({
   preparePlaceholder: (state, range) => state.doc.lineAt(range.to).number - state.doc.lineAt(range.from).number,
@@ -541,6 +556,7 @@ export function removeSection(view: View, index: number) {
   const head = view.state.selection.main.head;
   view.dispatch({
     changes: { from: s.from, to: s.from + s.prefix },
+    effects: foldEffects(view.state, s, false).map((e) => e.map(ChangeSet.of({ from: s.from, to: s.from + s.prefix }, view.state.doc.length))!), // its text shows again
     selection: head >= s.from && head <= s.headTo ? { anchor: Math.max(s.from, head - s.prefix) } : undefined,
     annotations: ops,
     userEvent: 'input.section',
@@ -562,11 +578,9 @@ export function moveSection(view: View, index: number, dir: -1 | 1): boolean {
   const bText = doc.sliceString(b.from, b.end);
   // [a.from, b.end) holds "a\nb"; it becomes "b\na"
   const insert = bText + '\n' + aText;
-  const moved = dir < 0 ? b : a; // the section being moved
+  // a cursor in either section travels with it (b now starts at a.from, a right after b)
   const head = state.selection.main.head;
-  const inMoved = head >= moved.from && head <= moved.end;
-  const newStart = dir < 0 ? a.from : a.from + bText.length + 1; // where the moved section now starts
-  const cursor = inMoved ? newStart + (head - moved.from) : undefined;
+  const cursor = head >= a.from && head <= a.end ? a.from + bText.length + 1 + (head - a.from) : head >= b.from && head <= b.end ? a.from + (head - b.from) : undefined;
   const foldA = isFolded(state, a);
   const foldB = isFolded(state, b);
   // folds inside the replaced text are dropped by the change; collapsed sections are folded again where
@@ -601,5 +615,5 @@ export function gotoSection(view: EditorView, index: number) {
 }
 
 export function sections(): Extension {
-  return [headField, folding, drawer, bars, normalize, guard, protectOnReplace];
+  return [headField, folding, openOnSelect, drawer, bars, normalize, guard, protectOnReplace];
 }

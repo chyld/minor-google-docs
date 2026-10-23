@@ -172,6 +172,51 @@ const bar = await page.evaluate(() => {
 });
 check('the bar runs past an image in the section', bar.top < bar.imgTop && bar.bottom > bar.imgBottom, bar);
 
+// ---- found in review ----
+{
+  const n = await makeNote(['Review', '## {teal} Alpha', 'unique-body-text', '## {sky} Beta', 'beta body']);
+  await open(n);
+  await openMenu('Alpha');
+  await page.click('.sec-pop [role=menuitem]:has-text("Collapse")');
+  await settle();
+  // raw text and back keeps it collapsed (and remembered)
+  await page.keyboard.press('Control+/');
+  await settle();
+  await page.keyboard.press('Control+/');
+  await settle();
+  check('raw text and back keeps a collapsed section collapsed', await shown('.sec-folded'));
+  await open(n);
+  check('…and remembered after a reload', await shown('.sec-folded'));
+  // Find for the whole last line of a collapsed body opens it
+  await caret(0);
+  await page.keyboard.press('Control+f');
+  await page.keyboard.type('unique-body-text');
+  await page.keyboard.press('Enter');
+  await settle();
+  check('Find matching a collapsed body\'s last line opens it', !(await shown('.sec-folded')));
+  await page.keyboard.press('Escape');
+  await open(n);
+  check('…and that stays open after a reload', !(await shown('.sec-folded')));
+  // keyboard: the palette opens the menu of the section the cursor is in
+  await caret((await doc()).indexOf('beta body'));
+  await page.keyboard.press('Control+k');
+  await page.keyboard.type('section options');
+  await settle();
+  await page.keyboard.press('Enter');
+  await settle();
+  check('the palette opens the current section\'s menu, focused', await page.evaluate(() => document.activeElement?.closest('.sec-pop [role=menu]') !== null && document.activeElement?.textContent.includes('Colour')));
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await settle();
+  check('…and it works from the keyboard (Move up)', (await doc()).startsWith('Review\n## {sky} Beta\nbeta body\n## {teal} Alpha'), await doc());
+  // a menu left open doesn't follow you to another note
+  await openMenu('Alpha');
+  await page.evaluate((id) => window.history.pushState({}, '', `/n/${id}`), id);
+  await page.evaluate(() => window.dispatchEvent(new PopStateEvent('popstate')));
+  await settle();
+  check('switching notes closes a section menu', !(await shown('.sec-pop')));
+}
+
 // ---- phones ----
 await page.setViewportSize({ width: 360, height: 760 });
 await open(id);

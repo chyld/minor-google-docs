@@ -193,3 +193,31 @@ describe('moving and collapsing', () => {
     expect(foldedSections(fresh)).toEqual([1]);
   });
 });
+
+describe('found in review', () => {
+  it('a cursor in the other section travels with it when moving', () => {
+    // cursor in Logs (index 1); move Setup (index 0) down past it
+    const s = run(mk(D, at(D, 'log line') + 3), (v) => moveSection(v, 0, 1));
+    expect(s.sliceDoc(s.selection.main.head - 3, s.selection.main.head + 5)).toBe('log line');
+  });
+
+  it('removing a collapsed section shows its text again', () => {
+    let s = run(mk(D), (v) => setFolded(v, 0, true));
+    s = run(s, (v) => removeSection(v, 0));
+    expect(foldedSections(s)).toEqual([]);
+    expect(s.doc.toString()).toContain('\nSetup\nline one');
+  });
+
+  it('a selection reaching the end of a collapsed body opens it', () => {
+    let s = run(mk(D), (v) => setFolded(v, 0, true));
+    const a = at(D, 'line one');
+    s = apply(s, { selection: { anchor: a, head: a + 8 }, userEvent: 'select.search' });
+    expect(foldedSections(s)).toEqual([]);
+  });
+
+  it('a cursor at the heading end leaves it collapsed', () => {
+    let s = run(mk(D), (v) => setFolded(v, 0, true));
+    s = apply(s, { selection: { anchor: at(D, 'Setup') + 5 }, userEvent: 'select' });
+    expect(foldedSections(s)).toEqual([0]);
+  });
+});

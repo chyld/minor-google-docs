@@ -116,6 +116,7 @@
     lightboxRef = null;
     menuOpen = false;
     hlMenu = null;
+    secPop = null;
     setLiveEditor(null);
     editor?.setDoc('', true); // read-only until we know what to show
     try {
@@ -181,7 +182,6 @@
   let secPopH = $state(120);
   let secLast = $state<string | null>(isHlName(localStorage.getItem('notes.secLast') ?? '') ? localStorage.getItem('notes.secLast') : null);
   let moreBtn: HTMLButtonElement | undefined = $state();
-  let restoring = false;
   const secPos = $derived.by(() => {
     if (!secPop) return { left: 0, top: 0 };
     const r = secPop.rect;
@@ -191,32 +191,14 @@
     return { left, top };
   });
 
-  // collapsed sections are remembered per note in this browser (never in the file)
-  const foldKey = (nid: string) => `notes.folds.${app.me?.id}:${nid}`;
-  function loadFolds(nid: string): number[] {
-    try {
-      const v = JSON.parse(localStorage.getItem(foldKey(nid)) ?? '[]');
-      return Array.isArray(v) ? v.filter((x) => Number.isInteger(x)) : [];
-    } catch {
-      return [];
-    }
-  }
-
   function onSections(list: SectionInfo[]) {
     sectionList = list;
     app.noteSections = list.map(({ name, color }) => ({ name, color }));
-    if (!note || app.raw || restoring) return;
-    const folded = list.flatMap((s, i) => (s.folded ? [i] : []));
-    if (folded.length) localStorage.setItem(foldKey(note.id), JSON.stringify(folded));
-    else localStorage.removeItem(foldKey(note.id));
   }
 
-  /** Show a note's text (and the sections collapsed last time). */
+  /** Show a note's text (the editor brings back the sections collapsed last time, kept per note in this browser). */
   function show(text: string, ro = false) {
-    restoring = true;
-    editor?.setDoc(text, ro);
-    if (note) editor?.setFolds(loadFolds(note.id));
-    restoring = false;
+    editor?.setDoc(text, ro, note ? `notes.folds.${app.me?.id}:${note.id}` : null);
   }
 
   const rectOf = (el: Element | null | undefined): Rect => {
@@ -300,11 +282,6 @@
         hlMenu = null;
         secPop = null;
         editor?.focus();
-      }
-      if (!r && wasRaw && note) {
-        restoring = true;
-        editor?.setFolds(loadFolds(note.id));
-        restoring = false;
       }
       wasRaw = r;
     });
@@ -528,6 +505,9 @@
     };
     const onAddSection = () => openSecPop('add', -1, document.querySelector('.note-bar button[aria-label="Add section"]')?.getClientRects().length ? document.querySelector('.note-bar button[aria-label="Add section"]') : moreBtn);
     const onGotoSection = (e: Event) => editor?.sectionGo((e as CustomEvent).detail);
+    const onSectionKeys = () => {
+      if (!editor?.openSectionMenu()) app.toast('Put the cursor in a section first.', 'info');
+    };
     const onSave = () => void saveNow();
     const onHide = () => {
       if (document.visibilityState === 'hidden') {
@@ -546,6 +526,7 @@
     window.addEventListener('notes:section-menu', onSectionMenu);
     window.addEventListener('notes:add-section', onAddSection);
     window.addEventListener('notes:goto-section', onGotoSection);
+    window.addEventListener('notes:section-options', onSectionKeys);
     window.addEventListener('notes:save', onSave);
     document.addEventListener('visibilitychange', onHide);
     window.addEventListener('beforeunload', onUnload);
@@ -558,6 +539,7 @@
       window.removeEventListener('notes:section-menu', onSectionMenu);
       window.removeEventListener('notes:add-section', onAddSection);
       window.removeEventListener('notes:goto-section', onGotoSection);
+      window.removeEventListener('notes:section-options', onSectionKeys);
       app.noteSections = [];
       window.removeEventListener('notes:save', onSave);
       document.removeEventListener('visibilitychange', onHide);

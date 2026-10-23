@@ -25,6 +25,7 @@
     ...(app.selectedId && !app.raw
       ? ([
           { kind: 'action', id: 'add-section', label: 'Add section', icon: 'section', run: () => window.dispatchEvent(new CustomEvent('notes:add-section')) },
+          ...(app.noteSections.length ? [{ kind: 'action', id: 'section-options', label: 'Section options (colour, move, collapse, remove)', icon: 'section', run: () => window.dispatchEvent(new CustomEvent('notes:section-options')) } as Item] : []),
           ...app.noteSections.map((s, i) => ({ kind: 'action', id: `section-${i}`, label: `Go to section: ${s.name}`, icon: 'toc', run: () => window.dispatchEvent(new CustomEvent('notes:goto-section', { detail: i })) })),
         ] as Item[])
       : []),
