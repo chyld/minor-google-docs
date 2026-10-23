@@ -202,6 +202,11 @@
     return { left, top };
   });
 
+  // the raw text has no colours to pick
+  $effect(() => {
+    if (app.raw) untrack(() => (hlMenu = null));
+  });
+
   function onSelectionInfo(i: HighlightInfo) {
     hl = i;
     box = scroller?.getBoundingClientRect() ?? null;
@@ -462,7 +467,17 @@
         <span class="muted small hide-narrow" title={fullTime(note.updated_at)}>Edited {relativeTime(note.updated_at)}</span>
       {/if}
       <div class="spacer"></div>
+      {#if note}
+        <button
+          class="icon-btn"
+          class:on={app.raw}
+          title={app.raw ? 'Show the rendered note (Ctrl+/)' : 'Edit the raw text (Ctrl+/)'}
+          aria-label="Raw text"
+          aria-pressed={app.raw}
+          onclick={() => app.setRaw(!app.raw)}><Icon name="code" /></button>
+      {/if}
       {#if note && !readonly}
+        {#if !app.raw}
         <div class="menu-wrap">
           <button
             class="icon-btn"
@@ -478,6 +493,7 @@
             <HighlightMenu class="hl-pop-bar" current={hl.current} last={hlLast} onpick={pickHighlight} onclose={closeHighlightMenu} />
           {/if}
         </div>
+        {/if}
         <button class="icon-btn" class:on={note.pinned} title={note.pinned ? 'Unpin' : 'Pin to top'} aria-label={note.pinned ? 'Unpin' : 'Pin to top'} aria-pressed={note.pinned} onclick={() => patch({ pinned: !note!.pinned })}>
           <Icon name="pin" />
         </button>
@@ -545,7 +561,7 @@
           <div class="note-skeleton" aria-hidden="true"><span></span><span></span><span></span></div>
         {/if}
         <div class:invisible={!note}>
-          <Editor bind:this={editor} {onchange} onfiles={handleFiles} onsave={saveNow} onblur={saveNow} onselection={onSelectionInfo} onhighlightkey={openHighlightMenu} />
+          <Editor bind:this={editor} raw={app.raw} {onchange} onfiles={handleFiles} onsave={saveNow} onblur={saveNow} onselection={onSelectionInfo} onhighlightkey={openHighlightMenu} />
         </div>
       </div>
     </div>
@@ -554,7 +570,11 @@
       <footer class="note-foot muted small">
         <span>{words.toLocaleString()} {words === 1 ? 'word' : 'words'}</span>
         <span>{plain.length.toLocaleString()} characters</span>
-        <span class="hide-narrow">Paste screenshots · drop files · Alt+T inserts time</span>
+        {#if app.raw}
+          <span class="raw-note">Raw text · Ctrl+/ shows the note</span>
+        {:else}
+          <span class="hide-narrow">Paste screenshots · drop files · Alt+T inserts time</span>
+        {/if}
       </footer>
     {/if}
   </div>

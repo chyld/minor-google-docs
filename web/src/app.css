@@ -1351,6 +1351,14 @@ input:focus {
   line-height: 1.3;
   padding: 6px 0 10px !important;
 }
+.editor-host.raw .cm-editor {
+  font-family: var(--mono);
+  font-size: 14.5px;
+  line-height: 1.65;
+}
+.note-foot .raw-note {
+  color: var(--accent);
+}
 .page.mono .cm-title-line {
   font-family: var(--font);
 }

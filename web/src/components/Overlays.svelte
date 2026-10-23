@@ -14,6 +14,7 @@
     ['Alt T', 'Insert current date & time'],
     ['Ctrl ⇧ H', 'Highlight the selection (Enter repeats the last colour)'],
     ['Ctrl V', 'Paste a screenshot into the note'],
+    ['Ctrl /', 'Raw text / rendered note'],
     ['Ctrl ⇧ F', 'Focus mode'],
     ['Ctrl \\', 'Collapse / expand the sidebar'],
     ['Ctrl ⇧ \\', 'Hide / show the notes list'],

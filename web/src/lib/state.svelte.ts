@@ -34,6 +34,7 @@ class AppState {
 
   theme = $state<Theme>((localStorage.getItem('notes.theme') as Theme) || 'system');
   mono = $state(localStorage.getItem('notes.mono') === '1');
+  raw = $state(localStorage.getItem('notes.raw') === '1'); // editor shows the stored text as-is
   focusMode = $state(false);
   sidebarOpen = $state(false); // mobile drawer
   // desktop layout (ignored on phones, where one pane shows at a time)
@@ -91,6 +92,11 @@ class AppState {
   setMono(v: boolean) {
     this.mono = v;
     localStorage.setItem('notes.mono', v ? '1' : '0');
+  }
+
+  setRaw(v: boolean) {
+    this.raw = v;
+    localStorage.setItem('notes.raw', v ? '1' : '0');
   }
 
   private saveLayout() {

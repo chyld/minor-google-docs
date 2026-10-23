@@ -42,6 +42,7 @@
     expand: 'M13 17l5-5-5-5M6 17l5-5-5-5',
     width: 'M3 12h18M7 8l-4 4 4 4M17 8l4 4-4 4',
     highlight: 'M14 4l6 6-8.5 8.5H6v-5.5L14 4zM9 9l6 6M3 21h9',
+    code: 'M8 7l-5 5 5 5M16 7l5 5-5 5M13.5 5l-3 14',
   };
 </script>
 

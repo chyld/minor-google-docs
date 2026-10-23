@@ -91,6 +91,9 @@
       if (!app.desktop) app.sidebarOpen = !app.sidebarOpen;
       else if (e.shiftKey) app.setListCollapsed(!app.listCollapsed);
       else app.setSidebarCollapsed(!app.sidebarCollapsed);
+    } else if (mod && !e.altKey && (e.code === 'Slash' || e.key === '/') && !modalOpen()) {
+      e.preventDefault();
+      app.setRaw(!app.raw);
     } else if (mod && k === 's' && !e.defaultPrevented) {
       e.preventDefault(); // never the browser's "save page"; the open note saves now
       window.dispatchEvent(new CustomEvent('notes:save'));

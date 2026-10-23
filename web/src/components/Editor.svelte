@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { EditorState, Annotation, EditorSelection, Prec, Transaction, type Line } from '@codemirror/state';
+  import { onMount, untrack } from 'svelte';
+  import { EditorState, Annotation, Compartment, EditorSelection, Prec, Transaction, type Extension, type Line } from '@codemirror/state';
   import { EditorView, drawSelection, keymap, placeholder } from '@codemirror/view';
   import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
   import { search, searchKeymap } from '@codemirror/search';
@@ -12,6 +12,7 @@
 
   interface Props {
     readonly?: boolean;
+    raw?: boolean; // show and edit the stored text as-is: no images, colours or title styling
     onchange: (text: string) => void;
     onfiles: (files: File[], at: 'cursor' | number) => void;
     onsave: () => void;
@@ -19,12 +20,23 @@
     onselection?: (info: HighlightInfo) => void;
     onhighlightkey?: () => void;
   }
-  let { readonly = false, onchange, onfiles, onsave, onblur, onselection, onhighlightkey }: Props = $props();
+  let { readonly = false, raw = false, onchange, onfiles, onsave, onblur, onselection, onhighlightkey }: Props = $props();
   let dragging = false;
 
   let host: HTMLDivElement;
   let view: EditorView | null = null;
   const external = Annotation.define<boolean>();
+  const rich = new Compartment(); // what turns the stored text into the rendered note
+  const richExtensions = () =>
+    untrack(() => raw)
+      ? []
+      : [
+          markers(),
+          // highlights first: transaction filters run last-registered first, so the image rules shape an
+          // edit (e.g. a dropped image gets its own line) before highlights split around the result
+          highlights(),
+          imageEditing(),
+        ];
   // whether the user has placed the cursor since this note loaded (attachments go there, else at the end)
   let touched = false;
   // Refs whose upload was canceled (null) or re-minted (new ref). Undo/redo can bring their old
@@ -49,11 +61,7 @@
       history(),
       search({ top: true }),
       Prec.highest(keymap.of([{ key: 'Mod-Shift-h', preventDefault: true, run: () => (onhighlightkey?.(), true) }])),
-      markers(),
-      // highlights first: transaction filters run last-registered first, so the image rules shape an
-      // edit (e.g. a dropped image gets its own line) before highlights split around the result
-      highlights(),
-      imageEditing(),
+      rich.of(richExtensions()),
       drawSelection({ drawRangeCursor: false }),
       EditorView.lineWrapping,
       placeholder('Start with a title…'),
@@ -120,13 +128,24 @@
     return () => view?.destroy();
   });
 
+  // switching keeps the text, the cursor and undo history; only how the text is drawn changes
+  $effect(() => {
+    const r = raw;
+    if (!view || (rich.get(view.state) as Extension[]).length === 0 === r) return;
+    view.dispatch({ effects: rich.reconfigure(richExtensions()) });
+    // back in the rendered view, let its rules move a cursor off image text and hidden delimiters
+    if (!r) view.dispatch({ selection: view.state.selection, userEvent: 'select' });
+    report();
+  });
+
   /** Replace the whole document without triggering onchange (loading a note). */
   export function setDoc(text: string, ro = false) {
     if (!view) return;
     touched = false;
     retired.clear(); // a fresh state has no history that could bring old markers back
     const doc = EditorState.create({ doc: text }).doc;
-    view.setState(EditorState.create({ doc, selection: initialSelection(doc), extensions: extensions(ro) }));
+    const selection = untrack(() => raw) ? EditorSelection.single(0) : initialSelection(doc);
+    view.setState(EditorState.create({ doc, selection, extensions: extensions(ro) }));
   }
 
   function highlightInfo(): HighlightInfo {
@@ -134,7 +153,7 @@
     if (!view) return none;
     const st = view.state;
     const focused = view.hasFocus;
-    if (st.readOnly || selectedImage(st)) return { ...none, focused };
+    if (st.readOnly || raw || selectedImage(st)) return { ...none, focused };
     const r = st.selection.main;
     const h = highlightAt(st);
     const current = h && r.from >= h.from && r.to <= h.to ? h.name : null;
@@ -168,7 +187,7 @@
   /** Cursor at the end of the note (or the last image selected, if the note ends with one). */
   function endSelection(st: EditorState): EditorSelection {
     const last = st.doc.line(st.doc.lines);
-    return isImageLine(last) ? EditorSelection.single(last.from, last.to) : EditorSelection.single(st.doc.length);
+    return isImageLine(last) && !raw ? EditorSelection.single(last.from, last.to) : EditorSelection.single(st.doc.length);
   }
 
   export function focus(atEnd = false) {
@@ -280,4 +299,4 @@
   }
 </script>
 
-<div class="editor-host" bind:this={host}></div>
+<div class="editor-host" class:raw bind:this={host}></div>

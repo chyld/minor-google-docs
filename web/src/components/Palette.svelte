@@ -22,6 +22,7 @@
     { kind: 'action', id: 'new', label: 'New note', icon: 'plus', hint: 'Alt N', run: () => app.newNote() },
     { kind: 'action', id: 'theme', label: 'Toggle dark mode', icon: 'moon', run: () => app.setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark') },
     { kind: 'action', id: 'trash', label: 'Go to trash', icon: 'trash', run: () => app.setView('trash') },
+    { kind: 'action', id: 'raw', label: app.raw ? 'Show the rendered note' : 'Edit the raw text', icon: 'code', hint: 'Ctrl /', run: () => app.setRaw(!app.raw) },
     { kind: 'action', id: 'focus', label: 'Toggle focus mode', icon: 'focus', hint: 'Ctrl ⇧ F', run: () => (app.focusMode = !app.focusMode) },
     ...(app.desktop
       ? ([

@@ -462,7 +462,7 @@ note's images, zoom-to-fit) · range downloads.
 - **Login:** single card on a gradient mesh, no sign-up link; if no users exist, shows the
   `notes user add` command.
 - **Keyboard:** Ctrl+K palette, Alt+N new (browsers reserve Ctrl+N), Ctrl+S save now,
-  Ctrl+\ sidebar rail, Ctrl+Shift+\ notes list, Ctrl+Shift+F focus mode, Ctrl+Shift+H highlight, `/` search, `?` cheat sheet (outside
+  Ctrl+\ sidebar rail, Ctrl+Shift+\ notes list, Ctrl+Shift+F focus mode, Ctrl+Shift+H highlight, Ctrl+/ raw text, `/` search, `?` cheat sheet (outside
   text fields). `c` (new note) and `j`/`k`/Enter only while the note list has focus.
 - **Accessibility:** visible focus rings, WCAG AA contrast, state never by color alone,
   `aria-live` save status, 40 px touch targets, 16 px inputs (no iOS zoom).
@@ -671,3 +671,23 @@ stay plain. Image lines are never highlights. No escapes. The TS parser is hand-
 Tests: `internal/core` (fixture, titles/previews), `web/src/lib/highlight.test.ts` (grammar, round-trip
 property, contrast), `web/src/lib/editor/highlights.test.ts` (apply/remove, edit rules, clipboard),
 `web/e2e/highlights.mjs` (browser).
+
+## 20. Raw text view
+
+A note-bar button (`</>`, Ctrl+/, also in the command palette) switches the editor between the rendered
+note and its raw text: the stored file exactly, in the monospace font: `[image:…]` lines, `=={name}…==`
+delimiters and the title line are plain, editable text.
+
+- **One editor.** The rendering extensions (`markers`, `highlights`, `imageEditing`) sit in a CodeMirror
+  compartment that is emptied in raw mode, so switching keeps the text, cursor and undo history. Raw
+  edits are saved like any other; switching back re-runs the rendered view's selection rules (a cursor
+  inside image text selects the image or moves off it; none rests in a hidden delimiter).
+- **No rules in raw.** Nothing reshapes edits there: delimiters can be typed or deleted one character at
+  a time, and copy/paste carry the text as-is. A broken highlight or marker is just text again in the
+  rendered view.
+- **No colour tools.** The highlight button, floating bar and Ctrl+Shift+H do nothing in raw mode.
+  Pasted or dropped images still upload and insert their marker line.
+- **Remembered.** The choice applies to every note and is kept in `localStorage` (`notes.raw`).
+  Works on trashed (read-only) notes too, for viewing.
+
+Tests: `web/e2e/raw.mjs` (browser).
