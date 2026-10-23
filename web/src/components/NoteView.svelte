@@ -590,7 +590,7 @@
       <div class="trash-banner"><Icon name="trash" size={16} /> This note is in the trash{app.trashDays > 0 ? ` and will be deleted after ${app.trashDays} days` : ''}. Restore it to edit.</div>
     {/if}
 
-    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions (a mouse shortcut; the keyboard has Ctrl+End) -->
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions (a mouse shortcut; the keyboard has Ctrl+End / Cmd+End) -->
     <div class="note-scroll" bind:this={scroller} onscroll={() => editor?.report()} onmousedown={pressScroll} onclick={clickScroll}>
       <div class="page" class:mono={app.mono}>
         {#if note}

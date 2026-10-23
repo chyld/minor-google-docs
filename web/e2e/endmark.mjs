@@ -32,6 +32,17 @@ await page.keyboard.press('Control+c');
 check('select-all + copy gives only the text', (await page.evaluate(() => navigator.clipboard.readText())) === (await doc()));
 check('…and the saved text has nothing extra', (await page.evaluate(async (id) => (await (await fetch(`/api/notes/${id}`, { headers: { 'X-Requested-With': 'notes' } })).json()).body, id)) === 'Wave check\nfirst line\nlast line');
 
+// the colour follows the note's first tag
+const tagged = await page.evaluate(async (id) => {
+  const H = { 'X-Requested-With': 'notes', 'Content-Type': 'application/json' };
+  const t = await (await fetch('/api/tags', { method: 'POST', headers: H, body: JSON.stringify({ name: `wave-${Date.now()}`, color: 'coral' }) })).json();
+  await fetch(`/api/notes/${id}`, { method: 'PATCH', headers: H, body: JSON.stringify({ tag_ids: [t.id ?? t.tag?.id] }) });
+  return true;
+}, id);
+await open(id);
+const hues = await page.evaluate((m) => ({ h: getComputedStyle(document.querySelector('.note')).getPropertyValue('--accent-h').trim(), stroke: getComputedStyle(document.querySelector(`${m} svg`)).stroke }), mark);
+check("with a tag, the wave takes the tag's hue", tagged && hues.h !== '295' && hues.stroke.includes(` ${hues.h})`), hues);
+
 // ---- clicking it, or the empty page below, goes to the end ----
 await page.evaluate(() => __v.dispatch({ selection: { anchor: 0 } }));
 const b = await box();
