@@ -22,6 +22,7 @@
   import HighlightMenu from './HighlightMenu.svelte';
   import { hlHue, isHlName, stripHighlights } from '../lib/highlight';
   import { stripSections } from '../lib/heading';
+  import { MARKER_RE } from '../lib/ids';
   import type { HighlightInfo } from '../lib/editor/highlights';
   import type { SectionInfo } from '../lib/editor/sections';
 
@@ -58,6 +59,8 @@
 
   const readonly = $derived(!!note?.trashed_at);
   const hasText = $derived(/\S/.test(pending)); // stops at the first visible character: no copy of the note
+  // sections go after the title line: a note of only images has none yet (checked on the debounced copy)
+  const hasTitle = $derived(counted.split('\n').some((l) => l.trim() !== '' && !MARKER_RE.test(l)));
   const plain = $derived(app.raw ? counted : stripSections(stripHighlights(counted))); // counts what is on screen: markup only in raw text
   const words = $derived(wordCount(plain));
   const shownRefs = $derived(refsIn(counted));
@@ -192,7 +195,7 @@
   });
 
   $effect(() => {
-    app.noteCanSection = !!note && !readonly && hasText;
+    app.noteCanSection = !!note && !readonly && hasTitle;
   });
   let secReady = $state(false); // the popover is placed once its size is known (no jump on opening)
   $effect(() => {
@@ -638,7 +641,7 @@
           aria-label="Add section"
           aria-haspopup="grid"
           aria-expanded={secPop?.kind === 'add'}
-          disabled={!hasText}
+          disabled={!hasTitle}
           onmousedown={(e) => e.preventDefault()}
           onclick={(e) => openSecPop('add', -1, e.currentTarget)}><Icon name="section" /></button>
         {#if sectionList.length}
@@ -676,7 +679,7 @@
               <div class="menu menu-right" role="menu" use:menu={{ onclose: () => (menuOpen = false) }}>
                 <button role="menuitem" data-first onclick={duplicate}><Icon name="copy" size={16} /> Duplicate</button>
                 {#if !app.raw}
-                  <button role="menuitem" disabled={!hasText} onclick={() => ((menuOpen = false), openSecPop('add', -1, moreBtn))}><Icon name="section" size={16} /> Add section</button>
+                  <button role="menuitem" disabled={!hasTitle} onclick={() => ((menuOpen = false), openSecPop('add', -1, moreBtn))}><Icon name="section" size={16} /> Add section</button>
                   {#if sectionList.length}
                     <button role="menuitem" onclick={() => ((menuOpen = false), openSecPop('list', -1, moreBtn))}><Icon name="toc" size={16} /> Sections</button>
                   {/if}

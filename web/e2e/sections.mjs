@@ -266,6 +266,13 @@ check('the bar runs past an image in the section', bar.top < bar.imgTop && bar.b
   check('…pasted mid-line, it is just the name', (await doc()).includes('boShelfdy text'), await doc());
 }
 
+// a note with only an image has no title line yet: Add section is off
+{
+  const n = await makeNote([{ img: 80 }]);
+  await open(n);
+  check('a note of only an image: Add section is disabled', await page.evaluate(() => document.querySelector('.note-bar button[aria-label="Add section"]')?.disabled === true));
+}
+
 // ---- phones ----
 await page.setViewportSize({ width: 360, height: 760 });
 await open(id);

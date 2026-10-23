@@ -757,7 +757,8 @@ A note can be divided into named, coloured sections. Design reviewed by the beta
     frozen while the mouse is down, like highlight delimiters.
   - "Strong" (`-deep`) colours look different: deeper ink (`--sec-deep-l`/`--sec-deep-c`, also
     contrast-tested), heavier weight, a 2px rule and a 5px fully opaque bar.
-  - Forced colours: `CanvasText` heading and bar.
+  - Forced colours: `CanvasText` heading, rule (a real border there: background images are dropped)
+    and bar.
   - A heading on the title line is not a section. The editor shows it as the title with its markup;
     the server's derived title strips the markup. This is accepted: insertion never puts one there.
 - **Heading controls.**
@@ -772,7 +773,8 @@ A note can be divided into named, coloured sections. Design reviewed by the beta
     colour grid. The last-used section colour is focused.
   - Picking a colour inserts `## {colour} New section` after the cursor's line, with "New section"
     selected for typing. With the cursor on a heading, it goes after that section's text, never into
-    its body or a collapsed part. The palette offers it only when the note is editable and has a title. It goes after a selected image. It is never on or above the title line. A
+    its body or a collapsed part. The button, ⋯ item and palette entry are offered only when the note is
+    editable and has a title line (a note of only images has none yet). It goes after a selected image. It is never on or above the title line. A
     blank line becomes the heading.
   - There is no keyboard shortcut (Ctrl+Shift+S is the browser's Save As). Typing `## ` never creates a
     section by itself; a completed valid line simply is one.

@@ -1401,7 +1401,8 @@ input:focus {
 @media (forced-colors: active) {
   .cm-sec-head {
     color: CanvasText;
-    background: linear-gradient(CanvasText, CanvasText) no-repeat 0 100% / 100% 1px;
+    background: none;
+    border-bottom: 1px solid CanvasText; /* background images are dropped in forced colours */
   }
   .cm-sec-bar {
     background: CanvasText;
