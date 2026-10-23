@@ -182,9 +182,33 @@ const key = (init) => page.evaluate((init) => window.dispatchEvent(new KeyboardE
   check('in raw text the palette still finds it by "raw"', await page.evaluate(() => [...document.querySelectorAll('[role="option"]')].some((o) => /raw text \(on\)/i.test(o.textContent))));
   await page.keyboard.press('Escape');
 
+  // a Find match stays exactly the match across a switch (Backspace then selects the image, not deletes it)
+  if (await isRaw()) await page.click(button);
+  await page.evaluate(() => __v.focus());
+  await page.keyboard.press('Control+f');
+  await page.waitForSelector('.cm-search input');
+  await page.keyboard.press('Control+a');
+  await page.keyboard.type('shot2');
+  await page.keyboard.press('Enter');
+  await settle();
+  const match = await page.evaluate(() => [__v.state.selection.main.from, __v.state.selection.main.to]);
+  await page.click(button);
+  await settle();
+  const wentRaw = await isRaw();
+  await page.click(button);
+  await settle();
+  const after = await page.evaluate(() => [__v.state.selection.main.from, __v.state.selection.main.to]);
+  check('a Find match keeps its range through raw and back', wentRaw && !(await isRaw()) && after[0] === match[0] && after[1] === match[1], { match, after });
+  await page.evaluate(() => __v.focus());
+  const kept = await doc();
+  await page.keyboard.press('Backspace');
+  check('…so Backspace selects the image instead of deleting it', (await doc()) === kept && kept.includes('shot2.png'), { kept, now: await doc(), sel: await page.evaluate(() => __v.state.selection.main) });
+  await page.keyboard.press('Escape');
+
   // every note, including trashed ones (read-only)
   const other = await makeNote(['Second note', 'plain body']);
   await page.evaluate(async (id) => fetch(`/api/notes/${id}`, { method: 'PATCH', headers: { 'X-Requested-With': 'notes', 'Content-Type': 'application/json' }, body: JSON.stringify({ trashed: true }) }), other);
+  await page.evaluate(() => localStorage.setItem('notes.raw', '1'));
   await open(other);
   check('a trashed note opens in raw text too, read-only', (await pressed()) && (await page.evaluate(() => __v.state.readOnly)));
 

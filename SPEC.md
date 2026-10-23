@@ -682,7 +682,8 @@ lines, `=={name}…==` delimiters and the title line are plain, editable text.
   compartment that holds `rawEditing()` instead in raw mode, so switching keeps the text, cursor and
   undo history. Raw edits are saved like any other. Switching back (and any undo/redo in the rendered
   view) re-runs the rendered view's selection rules: a cursor inside image text selects the image or
-  moves off it, and none rests in a hidden delimiter. That re-check is not "the user placed the cursor":
+  moves off it, and none rests in a hidden delimiter. A Find match (search panel open) keeps its exact
+  range, as when Find selected it, so the next Backspace selects the image rather than deleting it. That re-check is not "the user placed the cursor":
   attachments still go to the end of a note nobody clicked in (§17.6).
 - **Edit rules off, two safety nets on.** Typing and deleting are never reshaped: delimiters can be typed
   or deleted one character at a time, and copy gives the text as shown. A broken highlight or marker is

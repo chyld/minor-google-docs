@@ -3,7 +3,7 @@
   import { EditorState, Annotation, Compartment, EditorSelection, Prec, Transaction, type Line } from '@codemirror/state';
   import { EditorView, drawSelection, keymap, placeholder } from '@codemirror/view';
   import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
-  import { search, searchKeymap } from '@codemirror/search';
+  import { search, searchKeymap, searchPanelOpen } from '@codemirror/search';
   import { markers } from '../lib/editor/markers';
   import { rawEditing } from '../lib/editor/raw';
   import { imageEditing, imageLineRange, imageOp, initialSelection, isImageLine, selectedImage, textPos } from '../lib/editor/images';
@@ -137,7 +137,11 @@
    * hidden delimiters). */
   function recheckSelection() {
     if (!view || untrack(() => raw)) return;
-    view.dispatch({ selection: view.state.selection, userEvent: 'select', annotations: recheck.of(true) });
+    // a Find match keeps its exact range (as when Find selected it), or Backspace would act on the
+    // whole image line / highlight
+    const st = view.state;
+    const found = searchPanelOpen(st) && !st.selection.main.empty;
+    view.dispatch({ selection: st.selection, userEvent: found ? 'select.search' : 'select', annotations: recheck.of(true) });
   }
 
   // switching keeps the text, the cursor and undo history; only how the text is drawn changes
