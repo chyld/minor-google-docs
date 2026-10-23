@@ -315,3 +315,11 @@ describe('found in review, round 4', () => {
     expect(s.doc.toString()).toBe('Title\nabove\n## {teal} Setup\nbody');
   });
 });
+
+describe('found in review, round 5', () => {
+  it('moving keeps a final newline where it was (no stray blank line)', () => {
+    const d = 'Title\n## {teal} A\na1\n## {pink} B\nb1\n';
+    const s = run(mk(d), (v) => moveSection(v, 0, 1));
+    expect(s.doc.toString()).toBe('Title\n## {pink} B\nb1\n## {teal} A\na1\n');
+  });
+});
