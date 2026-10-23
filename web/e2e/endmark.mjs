@@ -91,14 +91,17 @@ const hostBox = () => page.evaluate(() => document.querySelector('.editor-host')
   const s1 = await sel();
   check('a drag from the text ending below the note keeps its selection', s1.to - s1.from > 5, s1);
 
-  // Shift+click below extends the selection instead of jumping
-  await page.evaluate(() => __v.dispatch({ selection: { anchor: 3 } }));
+  // Shift+click below extends the selection to the end
+  await page.evaluate(() => (__v.focus(), __v.dispatch({ selection: { anchor: 3 } })));
   const wb = await box();
   await page.keyboard.down('Shift');
   await page.mouse.click(wb.x + wb.width / 2, wb.y + wb.height / 2);
   await page.keyboard.up('Shift');
   await settle();
-  check('Shift+click on the wave does not collapse to the end', (await sel()).from === 3 || (await sel()).to - (await sel()).from > 0, await sel());
+  check('Shift+click on the wave extends the selection to the end', await page.evaluate(() => {
+    const r = __v.state.selection.main;
+    return r.anchor === 3 && r.head === __v.state.doc.length;
+  }), await sel());
 
   // the side margins under the note don't jump either
   await page.evaluate(() => (__v.focus(), __v.dispatch({ selection: { anchor: 3 } })));

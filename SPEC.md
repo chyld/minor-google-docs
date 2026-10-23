@@ -722,7 +722,8 @@ blank lines.
   end of the note: `focus(true)`, so in the rendered view a note ending with an image selects that image
   and typing starts a new line under it; in raw text the cursor goes to the very end of the text. Only
   a click that also *started* there counts (press and release within a few pixels): a drag-selection
-  from the text that ends below keeps its selection, and Shift/Ctrl/Alt/Meta clicks are left alone.
+  from the text that ends below keeps its selection. Shift+click extends the selection to the end;
+  Ctrl/Alt/Meta clicks are left alone.
   Nothing happens on trashed (read-only) notes (`cursor: default` there). On a phone a tap there works
   the same and brings up the keyboard, as tapping under the text does in other notes apps. The keyboard
   equivalent is Ctrl+End (Cmd+End / Cmd+↓ on a Mac).

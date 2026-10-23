@@ -211,6 +211,14 @@
     if (atEnd) view.dispatch({ selection: endSelection(view.state), annotations: imageOp.of(true) });
   }
 
+  /** Extend the selection to the end of the note (Shift+click under it). */
+  export function extendToEnd() {
+    if (!view) return;
+    view.focus();
+    const r = view.state.selection.main;
+    view.dispatch({ selection: { anchor: r.anchor, head: view.state.doc.length }, userEvent: 'select', scrollIntoView: true });
+  }
+
   /** Focus for adding attachments: keep the user's cursor if they placed one, else go to the end. */
   export function focusForInsert() {
     if (!view) return;

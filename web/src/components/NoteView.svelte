@@ -222,7 +222,7 @@
   let pressBelow: { x: number; y: number } | null = null;
 
   function isBelow(e: MouseEvent): boolean {
-    if (!note || readonly || e.button !== 0 || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return false;
+    if (!note || readonly || e.button !== 0 || e.ctrlKey || e.metaKey || e.altKey) return false;
     const t = e.target as HTMLElement;
     if (t.closest('.note-end')) return true;
     if (t.closest('.cm-editor, .note-tags, button, input, a, [role="menu"]')) return false;
@@ -237,7 +237,9 @@
   function clickScroll(e: MouseEvent) {
     const p = pressBelow;
     pressBelow = null;
-    if (p && isBelow(e) && Math.hypot(e.clientX - p.x, e.clientY - p.y) < 6) editor.focus(true);
+    if (!p || !isBelow(e) || Math.hypot(e.clientX - p.x, e.clientY - p.y) >= 6) return;
+    if (e.shiftKey) editor.extendToEnd(); // as Shift+click under the text does in other editors
+    else editor.focus(true);
   }
 
   function toggleRaw() {
