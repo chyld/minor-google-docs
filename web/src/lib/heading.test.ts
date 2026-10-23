@@ -50,14 +50,16 @@ describe('section heading colours are readable (WCAG AA, 4.5:1) in both themes',
   };
   const ratio = (a: number, b: number) => (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
   for (const [theme, b] of Object.entries(themes)) {
-    it(theme, () => {
-      const l = +tok(b, 'sec-l');
-      const c = +tok(b, 'sec-c');
-      expect(l).toBeGreaterThan(0);
-      for (const bg of ['bg', 'surface']) {
-        const back = hexLum(tok(b, bg));
-        for (const h of hues) expect(ratio(oklchLum(l, c, h), back), `${bg} hue ${h}`).toBeGreaterThanOrEqual(4.5);
-      }
-    });
+    for (const v of ['sec', 'sec-deep']) {
+      it(`${theme} ${v}`, () => {
+        const l = +tok(b, `${v}-l`);
+        const c = +tok(b, `${v}-c`);
+        expect(l).toBeGreaterThan(0);
+        for (const bg of ['bg', 'surface']) {
+          const back = hexLum(tok(b, bg));
+          for (const h of hues) expect(ratio(oklchLum(l, c, h), back), `${bg} hue ${h}`).toBeGreaterThanOrEqual(4.5);
+        }
+      });
+    }
   }
 });

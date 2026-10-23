@@ -68,6 +68,8 @@
   /* section heading text (contrast checked in heading.test.ts) */
   --sec-l: 0.48;
   --sec-c: 0.14;
+  --sec-deep-l: 0.38;
+  --sec-deep-c: 0.17;
 }
 
 [data-theme='dark'] {
@@ -108,6 +110,8 @@
 
   --sec-l: 0.8;
   --sec-c: 0.12;
+  --sec-deep-l: 0.88;
+  --sec-deep-c: 0.15;
 }
 
 /* ==========================================================================
@@ -1243,6 +1247,12 @@ input:focus {
   color: oklch(var(--sec-l) var(--sec-c) var(--h));
   background: linear-gradient(oklch(var(--dot-l) var(--dot-c) var(--h) / 0.5), oklch(var(--dot-l) var(--dot-c) var(--h) / 0.5)) no-repeat 0 100% / 100% 1px;
 }
+.cm-sec-head.deep {
+  /* "strong" colours: deeper ink, a heavier rule (and a heavier bar below) */
+  font-weight: 760;
+  color: oklch(var(--sec-deep-l) var(--sec-deep-c) var(--h));
+  background: linear-gradient(oklch(var(--dot-l) var(--dot-c) var(--h)), oklch(var(--dot-l) var(--dot-c) var(--h))) no-repeat 0 100% / 100% 2px;
+}
 .cm-sec-head .sec-delim {
   font-weight: 450;
   font-size: 0.8em;
@@ -1309,6 +1319,10 @@ input:focus {
   border-radius: 2px;
   background: oklch(var(--dot-l) var(--dot-c) var(--h));
   opacity: 0.75;
+}
+.cm-sec-bar.deep {
+  width: 5px;
+  opacity: 1;
 }
 .sec-h-25 {
   --h: 25;

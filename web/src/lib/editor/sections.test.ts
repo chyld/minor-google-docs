@@ -144,8 +144,23 @@ describe('edits keep headings whole', () => {
   it('the cursor never rests inside the prefix', () => {
     const s = apply(mk(d, 0), { selection: { anchor: at(d, '## ') + 2 }, userEvent: 'select' });
     expect(s.selection.main.head).toBe(nameAt);
-    const left = apply(mk(d, nameAt), { selection: { anchor: at(d, '## ') }, userEvent: 'select' });
-    expect(left.selection.main.head).toBe(at(d, '## ') - 1); // leaving leftwards: end of the line above
+    const left = apply(mk(d, nameAt), { selection: { anchor: nameAt - 1 }, userEvent: 'select' });
+    expect(left.selection.main.head).toBe(at(d, '## ') - 1); // ArrowLeft from the name start: end of the line above
+    const home = apply(mk(d, nameAt), { selection: { anchor: at(d, '## ') }, userEvent: 'select' });
+    expect(home.selection.main.head).toBe(nameAt); // Home: stays at the name start
+  });
+
+  it('Shift+Home from the name end selects just the name, so typing keeps the heading', () => {
+    const end = nameAt + 5;
+    const s = apply(mk(d, end), { selection: { anchor: end, head: at(d, '## ') }, userEvent: 'select' });
+    expect(s.sliceDoc(s.selection.main.from, s.selection.main.to)).toBe('Setup');
+    const typed = apply(s, { changes: { from: s.selection.main.from, to: s.selection.main.to, insert: 'Z' }, selection: { anchor: s.selection.main.from + 1 }, userEvent: 'input.type' });
+    expect(typed.doc.toString()).toBe('Title\n## {teal} Z\nbody');
+  });
+
+  it('a whole-line selection may start at the line start', () => {
+    const s = apply(mk(d), { selection: { anchor: at(d, '## '), head: at(d, 'body') }, userEvent: 'select' });
+    expect(s.selection.main.from).toBe(at(d, '## '));
   });
 
   it('replace-all never rewrites the prefix (rendered and raw)', () => {
@@ -170,7 +185,7 @@ describe('edits keep headings whole', () => {
 describe('moving and collapsing', () => {
   it('swaps a section with its neighbour; the text before the first section stays', () => {
     let s = run(mk(D, at(D, 'log line')), (v) => moveSection(v, 1, -1));
-    expect(s.doc.toString()).toBe('Title\nintro\n## {coral-deep} Logs\nlog line\n\n\n## {teal} Setup\nline one\n');
+    expect(s.doc.toString()).toBe('Title\nintro\n## {coral-deep} Logs\nlog line\n\n## {teal} Setup\nline one\n\n'); // blank lines stay put
     expect(s.sliceDoc(s.selection.main.head, s.selection.main.head + 8)).toBe('log line'); // the cursor travels
     s = run(s, (v) => moveSection(v, 0, 1));
     expect(s.doc.toString()).toBe('Title\nintro\n## {teal} Setup\nline one\n\n## {coral-deep} Logs\nlog line\n\n');
@@ -213,6 +228,24 @@ describe('found in review', () => {
     const a = at(D, 'line one');
     s = apply(s, { selection: { anchor: a, head: a + 8 }, userEvent: 'select.search' });
     expect(foldedSections(s)).toEqual([]);
+  });
+
+  it('Enter at a collapsed heading\'s end opens it (the fold never drifts off its heading)', () => {
+    let s = run(mk(D), (v) => setFolded(v, 0, true));
+    const e = at(D, 'Setup') + 5;
+    s = apply(apply(s, { selection: { anchor: e } }), { changes: { from: e, insert: '\n' }, selection: { anchor: e + 1 }, userEvent: 'input' });
+    expect(foldedSections(s)).toEqual([]);
+  });
+
+  it('Add section on a heading goes after that section\'s text', () => {
+    const s = run(mk(D, at(D, 'Setup')), (v) => insertSection(v, 'sky'));
+    expect(s.doc.toString()).toBe('Title\nintro\n## {teal} Setup\nline one\n## {sky} New section\n\n## {coral-deep} Logs\nlog line\n\n');
+  });
+
+  it('a range selection travels with a moved section', () => {
+    const a = at(D, 'log');
+    const s = run(mk(D, a, a + 8), (v) => moveSection(v, 1, -1));
+    expect(s.sliceDoc(s.selection.main.from, s.selection.main.to)).toBe('log line');
   });
 
   it('a cursor at the heading end leaves it collapsed', () => {

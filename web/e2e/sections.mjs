@@ -217,6 +217,30 @@ check('the bar runs past an image in the section', bar.top < bar.imgTop && bar.b
   check('switching notes closes a section menu', !(await shown('.sec-pop')));
 }
 
+// ---- round 2 of review ----
+{
+  const n = await makeNote(['Keys', '## {coral} Plain', 'p body', '## {coral-deep} Strong', 's body']);
+  await open(n);
+  const colors = await page.evaluate(() => [...document.querySelectorAll('.cm-sec-head')].map((h) => getComputedStyle(h).color));
+  check('a "strong" colour looks different from the plain one', colors.length === 2 && colors[0] !== colors[1], colors);
+  const nameAt = (await doc()).indexOf('Plain');
+  await caret(nameAt);
+  await page.keyboard.press('Home');
+  check('Home at the name start stays there', (await page.evaluate(() => __v.state.selection.main.head)) === nameAt);
+  await caret(nameAt + 5);
+  await page.keyboard.press('Shift+Home');
+  await page.keyboard.type('Renamed');
+  check('Shift+Home then typing renames, keeping the heading', (await doc()).includes('\n## {coral} Renamed\n'), await doc());
+  // a mouse click onto a heading is announced
+  await caret((await doc()).length);
+  await page.evaluate(() => [...document.querySelectorAll('.cm-sec-head')][1].scrollIntoView());
+  const r = await page.evaluate(() => [...document.querySelectorAll('.cm-sec-head')][1].getBoundingClientRect().toJSON());
+  await page.mouse.click(r.right - 60, r.top + r.height / 2);
+  await settle();
+  const said = await page.evaluate(() => document.querySelector('.cm-announced')?.textContent ?? '');
+  check('clicking onto a heading announces the section', /Section, coral strong, Strong/.test(said), said);
+}
+
 // ---- phones ----
 await page.setViewportSize({ width: 360, height: 760 });
 await open(id);

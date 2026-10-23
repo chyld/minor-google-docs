@@ -4,7 +4,9 @@
 import { HUES } from './colors';
 
 const NAMES = new Set(Object.keys(HUES).flatMap((h) => [h, `${h}-deep`]));
-const HEAD_RE = /^## \{([a-z]+(?:-deep)?)\} (.*)$/;
+const HEAD_RE = /^## \{([a-z]+(?:-deep)?)\} ([^\n]*)$/;
+// a name is blank if it has nothing but spaces and tabs (the server uses the same rule)
+const BLANK = /^[ \t]*$/;
 
 export interface Heading {
   color: string;
@@ -18,7 +20,7 @@ export interface Heading {
 export function parseHeading(text: string): Heading | null {
   if (!text.startsWith('## {')) return null;
   const m = HEAD_RE.exec(text);
-  if (!m || !NAMES.has(m[1]) || !m[2].trim()) return null;
+  if (!m || !NAMES.has(m[1]) || BLANK.test(m[2])) return null;
   return { color: m[1], name: m[2], prefix: m[1].length + 6 };
 }
 

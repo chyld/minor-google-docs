@@ -20,7 +20,7 @@ import {
 import { Decoration, EditorView, RectangleMarker, ViewPlugin, WidgetType, layer, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import { codeFolding, foldEffect, foldedRanges, unfoldEffect } from '@codemirror/language';
 import { isolateHistory } from '@codemirror/commands';
-import { hlHue, stripHighlights } from '../highlight';
+import { hlDeep, hlHue, stripHighlights } from '../highlight';
 import { headingLine, parseHeading } from '../heading';
 import { MARKER_RE } from '../ids';
 import { imageOp, selectedImage } from './images';
@@ -108,7 +108,9 @@ export function sectionsOf(state: EditorState): Section[] {
   if (hit) return hit;
   const title = titleFrom(doc);
   const heads: { from: number; to: number; prefix: number }[] = [];
-  for (let it = state.field(headField).iter(); it.value; it.next()) {
+  const field = state.field(headField, false);
+  if (!field) return []; // raw text: no sections
+  for (let it = field.iter(); it.value; it.next()) {
     if (it.from !== title) heads.push({ from: it.from, to: it.to, prefix: it.value.prefix });
   }
   const out = heads.map((h, index): Section => {
@@ -197,9 +199,18 @@ export function restoreFolds(view: EditorView, indexes: number[]) {
 // a selection reaching into a collapsed body opens it (CodeMirror only opens one the cursor lands
 // strictly inside, so a Find match ending at the body's end would stay hidden)
 const openOnSelect = EditorState.transactionExtender.of((tr) => {
-  if (!tr.selection) return null;
-  const folded = foldedRanges(tr.startState).map(tr.changes);
   const effects: StateEffect<unknown>[] = [];
+  // an edit at a collapsed body's start (Enter at the heading's end) opens it, so it never drifts off its heading
+  if (tr.docChanged) {
+    const before = foldedRanges(tr.startState);
+    tr.changes.iterChanges((fromA, toA) => {
+      before.between(fromA, toA, (f, t) => {
+        if (fromA <= f && f <= toA) effects.push(unfoldEffect.of({ from: tr.changes.mapPos(f, 1), to: tr.changes.mapPos(t, -1) }));
+      });
+    });
+  }
+  if (!tr.selection) return effects.length ? { effects } : null;
+  const folded = foldedRanges(tr.startState).map(tr.changes);
   for (const r of tr.newSelection.ranges) {
     folded.between(r.from, r.to, (f, t) => {
       if (r.empty ? f < r.head && r.head <= t : f < r.to && t > r.from) effects.push(unfoldEffect.of({ from: f, to: t }));
@@ -232,7 +243,7 @@ const headDeco = (color: string, active: boolean) => {
   const key = `${color}|${active}`;
   let d = headCache.get(key);
   if (!d) {
-    d = Decoration.line({ class: active ? 'cm-sec-head active' : 'cm-sec-head', attributes: { style: `--h:${hlHue(color)}`, 'data-sec': color } });
+    d = Decoration.line({ class: `cm-sec-head${hlDeep(color) ? ' deep' : ''}${active ? ' active' : ''}`, attributes: { style: `--h:${hlHue(color)}`, 'data-sec': color } });
     headCache.set(key, d);
   }
   return d;
@@ -319,7 +330,7 @@ const drawer = ViewPlugin.fromClass(
       const poked = u.transactions.some((t) => t.effects.some((e) => e.is(refresh) || e.is(foldEffect) || e.is(unfoldEffect)));
       const reveal = poked || u.docChanged || (u.selectionSet && !this.pointer);
       if (reveal || u.viewportChanged) this.compute(u.view, reveal);
-      if (u.selectionSet && !this.pointer) this.announce(u.view);
+      if ((u.selectionSet && !this.pointer) || u.transactions.some((t) => t.effects.some((e) => e.is(refresh)))) this.announce(u.view);
     }
 
     /** Moving onto a heading says which section it is (once per heading). */
@@ -393,7 +404,7 @@ const bars = layer({
       const last = view.lineBlockAt(s.bodyEnd);
       const top = view.documentTop + first.top - baseTop;
       const height = last.bottom - first.top;
-      out.push(new RectangleMarker(`cm-sec-bar sec-h-${hlHue(s.color)}`, left, top, null, height));
+      out.push(new RectangleMarker(`cm-sec-bar sec-h-${hlHue(s.color)}${hlDeep(s.color) ? ' deep' : ''}`, left, top, null, height));
     }
     return out;
   },
@@ -407,17 +418,21 @@ const normalize = EditorState.transactionFilter.of((tr) => {
   if (!secs.length) return tr;
   const old = tr.startState.selection.main.head;
   let changed = false;
-  const fix = (pos: number, cursor: boolean) => {
+  const fix = (pos: number, other: number | null) => {
     const s = secs.find((x) => x.from <= pos && pos < x.from + x.prefix);
-    if (!s || (!cursor && pos === s.from)) return pos; // a range may start at the line start (whole-line selections)
+    if (!s) return pos;
+    // a range may end at the line start only if it reaches beyond the heading (whole-line selections);
+    // Shift+Home from inside the name selects just the name, so typing over it keeps the heading
+    if (other !== null && pos === s.from && (other < s.from || other > s.headTo)) return pos;
     const end = s.from + s.prefix;
-    // leaving leftwards from the name's start goes to the end of the line above
-    if (old === end && pos < end && !tr.docChanged) return s.from > 0 ? s.from - 1 : end;
+    // ArrowLeft from the name's start (the markup is showing, so it steps one character) goes to the end
+    // of the line above; Home and everything else land at the name's start
+    if (other === null && old === end && pos === end - 1 && !tr.docChanged) return s.from > 0 ? s.from - 1 : end;
     return end;
   };
   const ranges = tr.newSelection.ranges.map((r) => {
-    const head = fix(r.head, r.empty);
-    const anchor = r.empty ? head : fix(r.anchor, false);
+    const head = fix(r.head, r.empty ? null : r.anchor);
+    const anchor = r.empty ? head : fix(r.anchor, r.head);
     if (head === r.head && anchor === r.anchor) return r;
     changed = true;
     return EditorSelection.range(anchor, head);
@@ -525,6 +540,9 @@ export function insertSection(view: View, color: string): boolean {
   const title = titleFrom(doc);
   if (title < 0) return false; // write a title first
   if (line.from <= title) line = doc.lineAt(title);
+  // on a heading, the new section goes after this section's text (never into its body or a collapsed part)
+  const own = sectionsOf(state).find((x) => x.from === line.from);
+  if (own) line = doc.lineAt(own.bodyEnd);
   const text = headingLine(color, NEW_SECTION_NAME);
   const nameAt = text.length - NEW_SECTION_NAME.length;
   let from: number, insert: string, at: number;
@@ -574,26 +592,28 @@ export function moveSection(view: View, index: number, dir: -1 | 1): boolean {
   const b = secs[dir < 0 ? index : index + 1];
   if (!a || !b || state.readOnly) return false;
   const doc = state.doc;
-  const aText = doc.sliceString(a.from, a.end);
-  const bText = doc.sliceString(b.from, b.end);
-  // [a.from, b.end) holds "a\nb"; it becomes "b\na"
-  const insert = bText + '\n' + aText;
-  // a cursor in either section travels with it (b now starts at a.from, a right after b)
-  const head = state.selection.main.head;
-  const cursor = head >= a.from && head <= a.end ? a.from + bText.length + 1 + (head - a.from) : head >= b.from && head <= b.end ? a.from + (head - b.from) : undefined;
+  // [a.from, b.end) is aCore + aGap + "\n" + bCore + bGap, where a gap is the blank lines after a
+  // section's last text. The sections swap; the blank lines between and after them stay put.
+  const aCore = doc.sliceString(a.from, a.bodyEnd);
+  const aGap = doc.sliceString(a.bodyEnd, a.end);
+  const bCore = doc.sliceString(b.from, b.bodyEnd);
+  const insert = bCore + aGap + '\n' + aCore + doc.sliceString(b.bodyEnd, b.end);
+  const aStart = a.from + bCore.length + aGap.length + 1; // where a now starts (b starts at a.from)
+  // positions in either section travel with it; positions in the gaps keep their place
+  const map = (p: number) =>
+    p >= a.from && p <= a.bodyEnd ? aStart + (p - a.from) : p >= b.from && p <= b.bodyEnd ? a.from + (p - b.from) : p > a.bodyEnd && p < b.from ? a.from + bCore.length + (p - a.bodyEnd) : p;
+  const sel = state.selection.main;
+  const inside = (p: number) => p >= a.from && p <= b.end;
   const foldA = isFolded(state, a);
   const foldB = isFolded(state, b);
   // folds inside the replaced text are dropped by the change; collapsed sections are folded again where
-  // they land (effect positions are in the new document): b now sits at a.from, a after it
+  // they land (effect positions are in the new document)
   const effects: StateEffect<unknown>[] = [];
-  const bLen = b.bodyEnd - b.from;
-  const aStart = a.from + bText.length + 1;
-  const aLen = a.bodyEnd - a.from;
-  if (foldB && b.bodyEnd > b.headTo) effects.push(foldEffect.of({ from: a.from + (b.headTo - b.from), to: a.from + bLen }));
-  if (foldA && a.bodyEnd > a.headTo) effects.push(foldEffect.of({ from: aStart + (a.headTo - a.from), to: aStart + aLen }));
+  if (foldB) effects.push(foldEffect.of({ from: a.from + (b.headTo - b.from), to: a.from + (b.bodyEnd - b.from) }));
+  if (foldA) effects.push(foldEffect.of({ from: aStart + (a.headTo - a.from), to: aStart + (a.bodyEnd - a.from) }));
   view.dispatch({
     changes: { from: a.from, to: b.end, insert },
-    selection: cursor === undefined ? undefined : { anchor: cursor },
+    selection: inside(sel.anchor) || inside(sel.head) ? EditorSelection.single(map(sel.anchor), map(sel.head)) : undefined,
     effects,
     annotations: ops,
     userEvent: 'move.section',

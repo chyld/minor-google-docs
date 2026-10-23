@@ -191,6 +191,16 @@
     return { left, top };
   });
 
+  $effect(() => {
+    app.noteCanSection = !!note && !readonly && hasText;
+  });
+  let secReady = $state(false); // the popover is placed once its size is known (no jump on opening)
+  $effect(() => {
+    if (!secPop) return void (secReady = false);
+    const f = requestAnimationFrame(() => (secReady = true));
+    return () => cancelAnimationFrame(f);
+  });
+
   function onSections(list: SectionInfo[]) {
     sectionList = list;
     app.noteSections = list.map(({ name, color }) => ({ name, color }));
@@ -769,7 +779,7 @@
 
   {#if secPop}
     <button class="menu-scrim" tabindex="-1" aria-hidden="true" onmousedown={(e) => e.preventDefault()} onclick={closeSecPop}></button>
-    <div class="sec-pop" style="left:{secPos.left}px; top:{secPos.top}px" bind:offsetWidth={secPopW} bind:offsetHeight={secPopH}>
+    <div class="sec-pop" style="left:{secPos.left}px; top:{secPos.top}px; opacity:{secReady ? 1 : 0}" bind:offsetWidth={secPopW} bind:offsetHeight={secPopH}>
       {#if secPop.kind === 'add' || secPop.kind === 'color'}
         <HighlightMenu
           label={secPop.kind === 'add' ? 'New section colour' : 'Section colour'}

@@ -10,7 +10,7 @@ import (
 // the name is not blank; anything else is ordinary text. The editor
 // (web/src/lib/heading.ts) has the same grammar; both are checked against
 // testdata/sections.json.
-var sectionRe = regexp.MustCompile(`^## \{([a-z]+(?:-deep)?)\} (.*)$`)
+var sectionRe = regexp.MustCompile(`^## \{([a-z]+(?:-deep)?)\} ([^\n]*)$`)
 
 var highlightNameSet = func() map[string]bool {
 	m := map[string]bool{}
@@ -26,7 +26,8 @@ func ParseSection(line string) (color, name string, ok bool) {
 		return "", "", false
 	}
 	m := sectionRe.FindStringSubmatch(line)
-	if m == nil || !highlightNameSet[m[1]] || strings.TrimSpace(m[2]) == "" {
+	// a name is blank if it has nothing but spaces and tabs (the editor uses the same rule)
+	if m == nil || !highlightNameSet[m[1]] || strings.Trim(m[2], " \t") == "" {
 		return "", "", false
 	}
 	return m[1], m[2], true
