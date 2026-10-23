@@ -67,9 +67,9 @@
     return !!el && (el.isContentEditable || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || !!el.closest?.('.cm-editor'));
   }
 
-  /** A text box other than the note (search, tags, rename): its keys are its own. */
+  /** A text box other than the note's text (search, tags, the editor's find field): its keys are its own. */
   function inField(t: EventTarget | null) {
-    return inEditable(t) && !(t as HTMLElement).closest?.('.cm-editor');
+    return inEditable(t) && !(t as HTMLElement).closest?.('.cm-content');
   }
 
   const modalOpen = () => app.paletteOpen || app.accountOpen || app.shortcutsOpen || !!document.querySelector('[aria-modal="true"]');

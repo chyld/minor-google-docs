@@ -27,7 +27,12 @@ await settle();
 check('the button turns raw text on', await pressed());
 check('raw text shows the image line and delimiters as text', !(await shown('.cm-img')) && !(await shown('.cm-content .hl')) && (await visibleText()).includes('=={amber}gateway==') && (await visibleText()).includes('[image:'), await visibleText());
 check('the highlight button is gone', !(await shown('.note-bar button[aria-label="Highlight"]')));
-check('raw text uses the monospace font', await page.evaluate(() => /mono/i.test(getComputedStyle(document.querySelector('.cm-editor')).fontFamily) || getComputedStyle(document.querySelector('.cm-editor')).fontFamily !== getComputedStyle(document.body).fontFamily));
+check('raw text uses the monospace font', await page.evaluate(() => {
+  const mono = getComputedStyle(document.documentElement).getPropertyValue('--mono').trim();
+  const f = getComputedStyle(document.querySelector('.cm-editor')).fontFamily;
+  const first = (v) => v.split(',')[0].replace(/["'\s]/g, '');
+  return !!mono && first(f) === first(mono);
+}));
 
 // editing the raw text as-is
 await page.evaluate(() => {
@@ -105,6 +110,12 @@ const key = (init) => page.evaluate((init) => window.dispatchEvent(new KeyboardE
   await page.focus('.list-head input');
   await page.keyboard.press('Control+/');
   check('Ctrl+/ in the search box does not switch the note', !(await isRaw()));
+  await page.evaluate(() => __v.focus());
+  await page.keyboard.press('Control+f');
+  await page.waitForSelector('.cm-search input');
+  await page.keyboard.press('Control+/');
+  check('…nor in the find field', !(await isRaw()));
+  await page.keyboard.press('Escape');
 
   // switching back and forth does not count as placing the cursor: an attachment still goes at the end
   await open(id);
@@ -183,6 +194,12 @@ const key = (init) => page.evaluate((init) => window.dispatchEvent(new KeyboardE
       return { inside: rs.every((r) => r.right <= innerWidth + 0.5), overlap };
     });
     check(`at ${w}px the note bar fits without overlaps`, fit.inside && !fit.overlap, fit);
+    for (const raw of [false, true]) {
+      await page.evaluate((raw) => (__v.dom.parentElement.classList.toggle('raw', raw), document.querySelector('.page').classList.toggle('mono', !raw)), raw);
+      const size = await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector('.cm-editor')).fontSize));
+      check(`at ${w}px the ${raw ? 'raw' : 'monospace'} font is at least 16px (no iOS zoom)`, size >= 16, size);
+    }
+    await page.evaluate(() => (document.querySelector('.page').classList.remove('mono'), __v.dom.parentElement.classList.toggle('raw', localStorage.getItem('notes.raw') === '1')));
   }
   check('…the raw button moves into the ⋯ menu', !(await shown(button)));
   const before = await isRaw();

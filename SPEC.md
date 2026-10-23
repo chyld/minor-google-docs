@@ -694,11 +694,11 @@ lines, `=={name}…==` delimiters and the title line are plain, editable text.
   still upload and insert their marker line. Footer counts include the delimiters (what is on screen).
 - **Shortcut.** Ctrl+/ goes by the character typed (`e.key === '/'`), so it follows the layout (Ctrl+Shift+7
   on German keys, AltGr layouts too) and never takes Ctrl+- or Ctrl+?; ignored while held (key repeat),
-  in other text boxes (search, tags), behind modals, or when the editor already handled the key.
+  in other text boxes (search, tags, the find field), behind modals, or when the editor already handled the key.
 - **Screen readers and focus.** Switching is announced ("Raw text" / "Rendered note"); the button keeps
   focus in the note on desktop.
 - **Phones.** Below 560 px the note-bar button is hidden (the bar must fit at 320 px) and "Raw text" is
-  in the ⋯ menu; the raw font stays 17 px so iOS doesn't zoom on focus. Trashed notes on phones have no
+  in the ⋯ menu; the raw (and monospace) font stays 17 px so iOS doesn't zoom on focus. Trashed notes on phones have no
   ⋯ menu, so the raw toggle is desktop-only there.
 - **Remembered.** The choice applies to every note and is kept in `localStorage` (`notes.raw`).
   Works on trashed (read-only) notes too, for viewing.

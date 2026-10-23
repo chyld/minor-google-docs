@@ -2436,7 +2436,8 @@ input:focus {
     display: none;
   }
   .editor-host .cm-editor,
-  .editor-host.raw .cm-editor {
+  .editor-host.raw .cm-editor,
+  .page.mono .cm-editor {
     font-size: 17px; /* at least 16px, or iOS zooms in on focus */
   }
   .tray {
