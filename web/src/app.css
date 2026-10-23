@@ -1225,6 +1225,26 @@ input:focus {
 .note-tags {
   margin: 0 0 10px;
 }
+.note-end {
+  display: flex;
+  justify-content: center;
+  margin-top: -14px; /* into the editor's bottom padding */
+  padding: 6px 0 14px;
+  cursor: text;
+  user-select: none;
+}
+.note-end svg {
+  fill: none;
+  stroke: oklch(var(--dot-l) var(--dot-c) var(--accent-h));
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  opacity: 0.55;
+}
+@media (forced-colors: active) {
+  .note-end svg {
+    stroke: GrayText;
+  }
+}
 .note-foot {
   display: flex;
   gap: 16px;

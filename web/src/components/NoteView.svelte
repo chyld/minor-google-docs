@@ -216,6 +216,15 @@
     });
   });
 
+  /** A click on the end mark or the empty page under the note puts the cursor at the end. */
+  function clickBelow(e: MouseEvent) {
+    if (!note || e.button !== 0) return;
+    const t = e.target as HTMLElement;
+    const host = t.closest('.page')?.querySelector('.editor-host');
+    const below = t === e.currentTarget && !!host && e.clientY > host.getBoundingClientRect().bottom;
+    if (below || t.closest('.note-end')) editor.focus(true);
+  }
+
   function toggleRaw() {
     app.setRaw(!app.raw);
     if (app.desktop) editor?.focus(); // keep typing; on a phone that would pop the keyboard up
@@ -567,7 +576,8 @@
     {/if}
 
     <div class="note-scroll" bind:this={scroller} onscroll={() => editor?.report()}>
-      <div class="page" class:mono={app.mono}>
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions (mouse-only shortcut; the keyboard has Ctrl+End) -->
+      <div class="page" class:mono={app.mono} onclick={clickBelow}>
         {#if note}
           <div class="note-tags">
             <TagInput tagIds={note.tag_ids} disabled={readonly} onchange={(ids) => patch({ tag_ids: ids })} />
@@ -578,6 +588,12 @@
         <div class:invisible={!note}>
           <Editor bind:this={editor} raw={app.raw} {onchange} onfiles={handleFiles} onsave={saveNow} onblur={saveNow} onselection={onSelectionInfo} onhighlightkey={openHighlightMenu} />
         </div>
+        {#if note && pending.trim()}
+          <!-- end of the note: drawn, never part of the text -->
+          <div class="note-end" aria-hidden="true">
+            <svg width="46" height="12" viewBox="0 0 46 12"><path d="M2 6c4-5 7-5 11 0s7 5 10 0 7-5 10 0 7 5 11 0" /></svg>
+          </div>
+        {/if}
       </div>
     </div>
 

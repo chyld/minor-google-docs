@@ -706,3 +706,21 @@ lines, `=={name}…==` delimiters and the title line are plain, editable text.
 
 Tests: `web/src/lib/editor/raw.test.ts` (replace-all safety net), `web/e2e/raw.mjs` (browser: switching,
 layouts, attachments, clipboard, counts, undo, focus, trashed notes, phone toolbar).
+
+## 21. End of note
+
+A small wave (`∿`, an inline SVG so it looks the same on every device) is drawn centred under the last
+line of every note with text, so it's clear nothing more follows, for example after a final image or
+blank lines.
+
+- **Not text.** It sits outside the editor (`.note-end` in `NoteView.svelte`), is `aria-hidden`, and can't
+  be selected, copied, searched or saved.
+- **Colour.** The note's accent hue (first tag; violet by default) at reduced opacity, in both themes;
+  `GrayText` in forced-colours mode.
+- **Click.** Clicking it, or the empty page under the note (not the side margins), puts the cursor at
+  the end of the note: `focus(true)`, so a note ending with an image selects that image and typing
+  starts a new line under it. The keyboard has Ctrl+End.
+- **When.** Every note with non-blank text, rendered or raw, read-only or not, desktop and phone; hidden
+  on an empty note (the placeholder shows there).
+
+Tests: `web/e2e/endmark.mjs` (browser).
