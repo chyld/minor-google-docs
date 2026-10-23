@@ -6,6 +6,7 @@ await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { o
 const doc = () => page.evaluate(() => __v.state.doc.toString());
 const settle = () => page.waitForTimeout(120);
 const shown = (sel) => page.evaluate((sel) => [...document.querySelectorAll(sel)].some((e) => e.getClientRects().length), sel);
+const head = () => page.evaluate(() => __v.state.selection.main.head);
 const visibleText = () => page.evaluate(() => document.querySelector('.cm-content').innerText);
 const button = '.note-bar button[aria-label="Raw text"]';
 const pressed = () => page.evaluate((b) => document.querySelector(b).getAttribute('aria-pressed') === 'true', button);
@@ -86,5 +87,110 @@ await page.keyboard.type('raw text');
 await settle();
 check('the command palette offers it', await page.evaluate(() => [...document.querySelectorAll('[role="option"]')].some((o) => /raw text/i.test(o.textContent))));
 await page.keyboard.press('Escape');
+
+// ---- found in review ----
+const isRaw = () => page.evaluate(() => localStorage.getItem('notes.raw') === '1');
+const key = (init) => page.evaluate((init) => window.dispatchEvent(new KeyboardEvent('keydown', { ctrlKey: true, bubbles: true, cancelable: true, ...init })), init);
+{
+  await open(id);
+  // the shortcut goes by the character typed, and only outside other text boxes
+  await key({ key: '-', code: 'Slash' }); // German layout: Ctrl+- (zoom out) on the US "/" key
+  await key({ key: '?', code: 'Slash', shiftKey: true });
+  await key({ key: '/', repeat: true });
+  check('Ctrl+- , Ctrl+? and a held key repeat do not switch', !(await isRaw()));
+  await key({ key: '/', code: 'Digit7', shiftKey: true }); // German Ctrl+Shift+7
+  check('Ctrl with the "/" character switches (any layout)', await isRaw());
+  await key({ key: '/', code: 'KeyQ', altKey: true }); // AltGr layouts report Ctrl+Alt
+  check('…including where "/" needs AltGr', !(await isRaw()));
+  await page.focus('.list-head input');
+  await page.keyboard.press('Control+/');
+  check('Ctrl+/ in the search box does not switch the note', !(await isRaw()));
+
+  // switching back and forth does not count as placing the cursor: an attachment still goes at the end
+  await open(id);
+  await page.click(button);
+  await page.click(button);
+  await page.waitForTimeout(300); // the button returns focus to the note
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+  await page.setInputFiles('.note-bar input[type=file]', { name: 'dot.png', mimeType: 'image/png', buffer: png });
+  await page.waitForFunction(() => __v.state.doc.toString().includes('dot.png'));
+  const lines = (await doc()).split('\n');
+  check('an attachment after switching twice still goes at the end', /dot\.png$/.test(lines[lines.length - 1]) || /dot\.png$/.test(lines[lines.length - 2]), lines);
+  await page.keyboard.press('Control+z');
+
+  // counts and clipboard across modes
+  await select('gateway');
+  await page.keyboard.press('Control+c');
+  await page.keyboard.press('Control+/');
+  await settle();
+  await page.evaluate(() => (__v.focus(), __v.dispatch({ selection: { anchor: __v.state.doc.length } })));
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Control+v');
+  check('a highlight copied in the rendered note pastes with its colour in raw text', (await doc()).endsWith('\n=={amber}gateway=='), await doc());
+  await page.waitForTimeout(400);
+  const chars = await page.evaluate(() => document.querySelector('.note-foot span:nth-child(2)').textContent);
+  check('raw text counts the characters on screen', chars === `${(await doc()).length} characters`, chars);
+  await page.keyboard.press('Control+z');
+
+  // undo after switching back never leaves the cursor in a hidden delimiter
+  await page.evaluate(() => {
+    __v.focus();
+    __v.dispatch({ selection: { anchor: __v.state.doc.toString().indexOf('gateway==') + 'gateway='.length } });
+  });
+  await page.keyboard.press('Backspace');
+  await page.keyboard.press('Control+/');
+  await settle();
+  await page.keyboard.press('Control+z');
+  await settle();
+  const inDelim = await page.evaluate(() => {
+    const t = __v.state.doc.toString();
+    const h = __v.state.selection.main.head;
+    const close = t.indexOf('gateway==') + 'gateway'.length;
+    const open = t.indexOf('=={amber}');
+    return (h > close && h < close + 2) || (h > open && h < open + 9);
+  });
+  check('undo in the rendered note keeps the cursor out of hidden delimiters', (await doc()).includes('=={amber}gateway==') && !inDelim, await head());
+
+  // the colour grid closing because of the switch hands focus back to the note
+  await select('Raw');
+  await page.keyboard.press('Control+Shift+h');
+  await settle();
+  await page.keyboard.press('Control+/');
+  await settle();
+  check('switching with the colours open returns focus to the note', !(await shown('.hl-menu')) && (await page.evaluate(() => __v.hasFocus)));
+  await page.keyboard.press('Control+k');
+  await page.keyboard.type('raw');
+  await settle();
+  check('in raw text the palette still finds it by "raw"', await page.evaluate(() => [...document.querySelectorAll('[role="option"]')].some((o) => /raw text \(on\)/i.test(o.textContent))));
+  await page.keyboard.press('Escape');
+
+  // every note, including trashed ones (read-only)
+  const other = await makeNote(['Second note', 'plain body']);
+  await page.evaluate(async (id) => fetch(`/api/notes/${id}`, { method: 'PATCH', headers: { 'X-Requested-With': 'notes', 'Content-Type': 'application/json' }, body: JSON.stringify({ trashed: true }) }), other);
+  await open(other);
+  check('a trashed note opens in raw text too, read-only', (await pressed()) && (await page.evaluate(() => __v.state.readOnly)));
+
+  // phones: the toolbar fits, raw text lives in the ⋯ menu
+  await open(id);
+  for (const w of [320, 360]) {
+    await page.setViewportSize({ width: w, height: 760 });
+    await settle();
+    const fit = await page.evaluate(() => {
+      const bar = document.querySelector('.note-bar');
+      const els = [...bar.querySelectorAll(':scope > button, :scope > .menu-wrap > button.icon-btn, :scope > .status')].filter((e) => e.getClientRects().length);
+      const rs = els.map((e) => e.getBoundingClientRect());
+      const overlap = rs.some((a, i) => rs.some((b, j) => i < j && a.right > b.left + 1 && b.right > a.left + 1));
+      return { inside: rs.every((r) => r.right <= innerWidth + 0.5), overlap };
+    });
+    check(`at ${w}px the note bar fits without overlaps`, fit.inside && !fit.overlap, fit);
+  }
+  check('…the raw button moves into the ⋯ menu', !(await shown(button)));
+  const before = await isRaw();
+  await page.click('.note-bar button[aria-label="More actions"]');
+  await page.click('[role="menuitemcheckbox"]:has-text("Raw text")');
+  await settle();
+  check('…which switches it', (await isRaw()) !== before && (await shown('.cm-img')) === before);
+  await page.evaluate(() => localStorage.setItem('notes.raw', '0'));
+}
 
 await finish();

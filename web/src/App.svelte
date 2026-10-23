@@ -67,6 +67,11 @@
     return !!el && (el.isContentEditable || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || !!el.closest?.('.cm-editor'));
   }
 
+  /** A text box other than the note (search, tags, rename): its keys are its own. */
+  function inField(t: EventTarget | null) {
+    return inEditable(t) && !(t as HTMLElement).closest?.('.cm-editor');
+  }
+
   const modalOpen = () => app.paletteOpen || app.accountOpen || app.shortcutsOpen || !!document.querySelector('[aria-modal="true"]');
 
   function onkeydown(e: KeyboardEvent) {
@@ -91,9 +96,10 @@
       if (!app.desktop) app.sidebarOpen = !app.sidebarOpen;
       else if (e.shiftKey) app.setListCollapsed(!app.listCollapsed);
       else app.setSidebarCollapsed(!app.sidebarCollapsed);
-    } else if (mod && !e.altKey && (e.code === 'Slash' || e.key === '/') && !modalOpen()) {
+    } else if (mod && e.key === '/' && !e.defaultPrevented && !modalOpen() && !inField(e.target)) {
+      // by the character typed (so Ctrl+Shift+7 on German keys; never Ctrl+- or Ctrl+?), AltGr allowed
       e.preventDefault();
-      app.setRaw(!app.raw);
+      if (!e.repeat) app.setRaw(!app.raw);
     } else if (mod && k === 's' && !e.defaultPrevented) {
       e.preventDefault(); // never the browser's "save page"; the open note saves now
       window.dispatchEvent(new CustomEvent('notes:save'));

@@ -55,7 +55,7 @@
   let popH = $state(110);
 
   const readonly = $derived(!!note?.trashed_at);
-  const plain = $derived(stripHighlights(counted)); // counts ignore highlight delimiters
+  const plain = $derived(app.raw ? counted : stripHighlights(counted)); // counts what is on screen: delimiters only in raw text
   const words = $derived(wordCount(plain));
   const shownRefs = $derived(refsIn(counted));
   const draftKey = (nid: string) => `${app.me?.id}:${nid}`;
@@ -204,8 +204,16 @@
 
   // the raw text has no colours to pick
   $effect(() => {
-    if (app.raw) untrack(() => (hlMenu = null));
+    if (app.raw)
+      untrack(() => {
+        if (hlMenu) closeHighlightMenu(); // focus was in the colours: back to the note
+      });
   });
+
+  function toggleRaw() {
+    app.setRaw(!app.raw);
+    if (app.desktop) editor?.focus(); // keep typing; on a phone that would pop the keyboard up
+  }
 
   function onSelectionInfo(i: HighlightInfo) {
     hl = i;
@@ -469,12 +477,12 @@
       <div class="spacer"></div>
       {#if note}
         <button
-          class="icon-btn"
+          class="icon-btn hide-phone"
           class:on={app.raw}
           title={app.raw ? 'Show the rendered note (Ctrl+/)' : 'Edit the raw text (Ctrl+/)'}
           aria-label="Raw text"
           aria-pressed={app.raw}
-          onclick={() => app.setRaw(!app.raw)}><Icon name="code" /></button>
+          onclick={toggleRaw}><Icon name="code" /></button>
       {/if}
       {#if note && !readonly}
         {#if !app.raw}
@@ -524,6 +532,7 @@
               <button class="menu-scrim" tabindex="-1" aria-hidden="true" onclick={() => (menuOpen = false)}></button>
               <div class="menu menu-right" role="menu" use:menu={{ onclose: () => (menuOpen = false) }}>
                 <button role="menuitem" data-first onclick={duplicate}><Icon name="copy" size={16} /> Duplicate</button>
+                <button role="menuitemcheckbox" aria-checked={app.raw} onclick={() => ((menuOpen = false), toggleRaw())}><Icon name="code" size={16} /> Raw text</button>
                 <button role="menuitem" onclick={() => ((menuOpen = false), app.setMono(!app.mono))}><Icon name="type" size={16} /> {app.mono ? 'Proportional font' : 'Monospace font'}</button>
                 <button role="menuitem" onclick={() => ((menuOpen = false), (app.focusMode = !app.focusMode))}><Icon name="focus" size={16} /> {app.focusMode ? 'Exit focus mode' : 'Focus mode'}</button>
                 <hr />

@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
-  import { EditorState, Annotation, Compartment, EditorSelection, Prec, Transaction, type Extension, type Line } from '@codemirror/state';
+  import { EditorState, Annotation, Compartment, EditorSelection, Prec, Transaction, type Line } from '@codemirror/state';
   import { EditorView, drawSelection, keymap, placeholder } from '@codemirror/view';
   import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
   import { search, searchKeymap } from '@codemirror/search';
   import { markers } from '../lib/editor/markers';
+  import { rawEditing } from '../lib/editor/raw';
   import { imageEditing, imageLineRange, imageOp, initialSelection, isImageLine, selectedImage, textPos } from '../lib/editor/images';
   import { applyHighlight, highlightAt, highlights, type HighlightInfo } from '../lib/editor/highlights';
   import { stamp } from '../lib/format';
@@ -26,17 +27,18 @@
   let host: HTMLDivElement;
   let view: EditorView | null = null;
   const external = Annotation.define<boolean>();
+  // a selection re-checked by the rendered view's rules (not the user placing the cursor)
+  const recheck = Annotation.define<boolean>();
   const rich = new Compartment(); // what turns the stored text into the rendered note
-  const richExtensions = () =>
-    untrack(() => raw)
-      ? []
-      : [
-          markers(),
-          // highlights first: transaction filters run last-registered first, so the image rules shape an
-          // edit (e.g. a dropped image gets its own line) before highlights split around the result
-          highlights(),
-          imageEditing(),
-        ];
+  const richExt = [
+    markers(),
+    // highlights first: transaction filters run last-registered first, so the image rules shape an
+    // edit (e.g. a dropped image gets its own line) before highlights split around the result
+    highlights(),
+    imageEditing(),
+  ];
+  const rawExt = rawEditing();
+  const richExtensions = () => (untrack(() => raw) ? rawExt : richExt);
   // whether the user has placed the cursor since this note loaded (attachments go there, else at the end)
   let touched = false;
   // Refs whose upload was canceled (null) or re-minted (new ref). Undo/redo can bring their old
@@ -83,8 +85,11 @@
       ]),
       EditorView.updateListener.of((u) => {
         if (u.docChanged && !u.transactions.some((t) => t.annotation(external))) onchange(u.state.doc.toString());
-        if (u.transactions.some((t) => t.annotation(Transaction.userEvent))) touched = true;
-        if (u.docChanged && u.transactions.some((t) => t.isUserEvent('undo') || t.isUserEvent('redo'))) queueMicrotask(reapplyRetired);
+        if (u.transactions.some((t) => t.annotation(Transaction.userEvent) && !t.annotation(recheck))) touched = true;
+        if (u.docChanged && u.transactions.some((t) => t.isUserEvent('undo') || t.isUserEvent('redo'))) {
+          queueMicrotask(reapplyRetired);
+          queueMicrotask(recheckSelection); // history restores cursors without the edit rules
+        }
         if (u.selectionSet || u.docChanged || u.focusChanged || u.geometryChanged) report();
       }),
       EditorView.domEventHandlers({
@@ -128,13 +133,19 @@
     return () => view?.destroy();
   });
 
+  /** Run the rendered view's selection rules on the current selection (off image text, out of
+   * hidden delimiters). */
+  function recheckSelection() {
+    if (!view || untrack(() => raw)) return;
+    view.dispatch({ selection: view.state.selection, userEvent: 'select', annotations: recheck.of(true) });
+  }
+
   // switching keeps the text, the cursor and undo history; only how the text is drawn changes
   $effect(() => {
     const r = raw;
-    if (!view || (rich.get(view.state) as Extension[]).length === 0 === r) return;
-    view.dispatch({ effects: rich.reconfigure(richExtensions()) });
-    // back in the rendered view, let its rules move a cursor off image text and hidden delimiters
-    if (!r) view.dispatch({ selection: view.state.selection, userEvent: 'select' });
+    if (!view || rich.get(view.state) === (r ? rawExt : richExt)) return;
+    view.dispatch({ effects: [rich.reconfigure(richExtensions()), EditorView.announce.of(r ? 'Raw text' : 'Rendered note')] });
+    recheckSelection();
     report();
   });
 

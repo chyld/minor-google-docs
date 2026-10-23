@@ -674,20 +674,34 @@ property, contrast), `web/src/lib/editor/highlights.test.ts` (apply/remove, edit
 
 ## 20. Raw text view
 
-A note-bar button (`</>`, Ctrl+/, also in the command palette) switches the editor between the rendered
-note and its raw text: the stored file exactly, in the monospace font: `[image:…]` lines, `=={name}…==`
-delimiters and the title line are plain, editable text.
+A note-bar button (`</>`, Ctrl+/, the ⋯ menu's "Raw text", and the command palette) switches the editor
+between the rendered note and its raw text: the stored file exactly, in the monospace font: `[image:…]`
+lines, `=={name}…==` delimiters and the title line are plain, editable text.
 
 - **One editor.** The rendering extensions (`markers`, `highlights`, `imageEditing`) sit in a CodeMirror
-  compartment that is emptied in raw mode, so switching keeps the text, cursor and undo history. Raw
-  edits are saved like any other; switching back re-runs the rendered view's selection rules (a cursor
-  inside image text selects the image or moves off it; none rests in a hidden delimiter).
-- **No rules in raw.** Nothing reshapes edits there: delimiters can be typed or deleted one character at
-  a time, and copy/paste carry the text as-is. A broken highlight or marker is just text again in the
-  rendered view.
-- **No colour tools.** The highlight button, floating bar and Ctrl+Shift+H do nothing in raw mode.
-  Pasted or dropped images still upload and insert their marker line.
+  compartment that holds `rawEditing()` instead in raw mode, so switching keeps the text, cursor and
+  undo history. Raw edits are saved like any other. Switching back (and any undo/redo in the rendered
+  view) re-runs the rendered view's selection rules: a cursor inside image text selects the image or
+  moves off it, and none rests in a hidden delimiter. That re-check is not "the user placed the cursor":
+  attachments still go to the end of a note nobody clicked in (§17.6).
+- **Edit rules off, two safety nets on.** Typing and deleting are never reshaped: delimiters can be typed
+  or deleted one character at a time, and copy gives the text as shown. A broken highlight or marker is
+  just text again in the rendered view. But search-and-replace never rewrites an `[image:ref]` or a
+  highlight's delimiters (a replace-all would cut images loose; captions and highlighted text are fine),
+  and text copied in the rendered view pastes with its highlights (`text/x-notes-raw`).
+- **No colour tools.** The highlight button, floating bar and Ctrl+Shift+H do nothing in raw mode;
+  switching with the colours open closes them and returns focus to the note. Pasted or dropped images
+  still upload and insert their marker line. Footer counts include the delimiters (what is on screen).
+- **Shortcut.** Ctrl+/ goes by the character typed (`e.key === '/'`), so it follows the layout (Ctrl+Shift+7
+  on German keys, AltGr layouts too) and never takes Ctrl+- or Ctrl+?; ignored while held (key repeat),
+  in other text boxes (search, tags), behind modals, or when the editor already handled the key.
+- **Screen readers and focus.** Switching is announced ("Raw text" / "Rendered note"); the button keeps
+  focus in the note on desktop.
+- **Phones.** Below 560 px the note-bar button is hidden (the bar must fit at 320 px) and "Raw text" is
+  in the ⋯ menu; the raw font stays 17 px so iOS doesn't zoom on focus. Trashed notes on phones have no
+  ⋯ menu, so the raw toggle is desktop-only there.
 - **Remembered.** The choice applies to every note and is kept in `localStorage` (`notes.raw`).
   Works on trashed (read-only) notes too, for viewing.
 
-Tests: `web/e2e/raw.mjs` (browser).
+Tests: `web/src/lib/editor/raw.test.ts` (replace-all safety net), `web/e2e/raw.mjs` (browser: switching,
+layouts, attachments, clipboard, counts, undo, focus, trashed notes, phone toolbar).

@@ -2272,6 +2272,9 @@ input:focus {
   margin: 8px 2px 0;
 }
 @media (max-width: 560px) {
+  .hide-phone {
+    display: none !important; /* still in the ⋯ menu */
+  }
   .hl-grid [role='row'] {
     grid-template-columns: repeat(6, 36px);
   }
@@ -2432,8 +2435,9 @@ input:focus {
   .note-foot {
     display: none;
   }
-  .editor-host .cm-editor {
-    font-size: 17px;
+  .editor-host .cm-editor,
+  .editor-host.raw .cm-editor {
+    font-size: 17px; /* at least 16px, or iOS zooms in on focus */
   }
   .tray {
     left: 12px;
