@@ -42,5 +42,7 @@ export function stripSections(text: string): string {
 export function headingSlice(text: string, from: number, to: number): { plain: string; raw: string } | null {
   const h = text.startsWith('## {') ? parseHeading(text) : null;
   if (!h) return null;
-  return { plain: text.slice(Math.max(from, h.prefix), Math.max(to, h.prefix)), raw: text.slice(from, to) };
+  // a copy of the whole name keeps the heading for this app (pasted on its own line it is a section again)
+  const whole = from <= h.prefix && to === text.length;
+  return { plain: text.slice(Math.max(from, h.prefix), Math.max(to, h.prefix)), raw: text.slice(whole ? 0 : from, to) };
 }

@@ -786,6 +786,8 @@ A note can be divided into named, coloured sections. Design reviewed by the beta
     the rest into the body.
   - Backspace at the first body line's start, Delete at the heading's end, and Delete at the end of a
     non-blank line just above a heading move the cursor instead of merging lines.
+  - Indenting (Tab, Ctrl+]) skips heading lines. Text inserted at a heading's line start goes to
+    the name's start, unless it is whole lines inserted above the heading.
   - These rules apply to every change in an edit: several cursors, or an edit that the highlight
     rules split in two. With several cursors, a deletion that would merge a body (or the line above)
     into a heading is dropped.
@@ -822,7 +824,9 @@ A note can be divided into named, coloured sections. Design reviewed by the beta
     CodeMirror lines aren't real headings. Moving onto a heading, by keyboard or click, announces
     "Section, colour, name".
 - **Elsewhere.**
-  - Copy: other apps get the name (`text/plain`); this app keeps the heading (`text/x-notes-raw`).
+  - Copy: other apps get the name (`text/plain`); this app keeps the heading (`text/x-notes-raw`),
+    including when just the whole name is selected. Pasted at a line start it is a section again;
+    mid-line it pastes as its name.
   - Title, preview, search index and snippets (`core.SearchText`) and footer counts drop the markup and
     keep the name.
   - Export and backups keep the raw text.

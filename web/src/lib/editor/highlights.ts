@@ -435,6 +435,8 @@ const pasteIn = EditorView.clipboardInputFilter.of((text, state) => {
   // pasted into a highlight, the text takes that highlight's colour instead
   const r = state.selection.main;
   if (highlightsIn(state, r.from, r.to).some((h) => r.from >= h.innerFrom && r.to <= h.innerTo)) return text;
+  // a copied section heading only becomes one again at the start of a line; mid-line it pastes as its name
+  if (at === 0 && isHeadingLine(p.raw.split('\n')[0]) && state.doc.lineAt(r.from).from !== r.from) return text;
   return text.slice(0, at) + p.raw + text.slice(at + p.plain.length);
 });
 

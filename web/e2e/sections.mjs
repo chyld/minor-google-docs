@@ -241,6 +241,31 @@ check('the bar runs past an image in the section', bar.top < bar.imgTop && bar.b
   check('clicking onto a heading announces the section', /Section, coral strong, Strong/.test(said), said);
 }
 
+// ---- round 3 of review: Tab, copying a heading ----
+{
+  const n = await makeNote(['Tabs', '## {mint} Shelf', 'body text', 'end line']);
+  await open(n);
+  await caret((await doc()).indexOf('Shelf') + 2);
+  await page.keyboard.press('Tab');
+  check('Tab on a heading leaves it a section', (await heads()).join() === 'mint' && (await doc()).includes('\n## {mint} Shelf\n'), await doc());
+  // copy the whole name, paste on its own line: a section again; mid-line: just the name
+  await page.evaluate(() => {
+    const t = __v.state.doc.toString();
+    __v.focus();
+    __v.dispatch({ selection: { anchor: t.indexOf('Shelf'), head: t.indexOf('Shelf') + 5 }, userEvent: 'select' });
+  });
+  await page.keyboard.press('Control+c');
+  await caret((await doc()).length);
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Control+v');
+  await settle();
+  check('a copied heading pasted on its own line is a section again', (await heads()).join() === 'mint,mint', await doc());
+  await caret((await doc()).indexOf('body') + 2);
+  await page.keyboard.press('Control+v');
+  await settle();
+  check('…pasted mid-line, it is just the name', (await doc()).includes('boShelfdy text'), await doc());
+}
+
 // ---- phones ----
 await page.setViewportSize({ width: 360, height: 760 });
 await open(id);

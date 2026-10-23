@@ -507,9 +507,25 @@ const guard = EditorState.transactionFilter.of((tr): TransactionSpec | readonly 
   let out = changes;
   let reshaped = false;
   let caret: number | null = null; // the cursor after a single reshaped edit
+  const indent = tr.isUserEvent('input.indent') || tr.isUserEvent('delete.dedent');
   if (!replace) {
     out = [];
     for (const c of changes) {
+      // indenting (Tab, Ctrl+]) never touches a heading line: it would push "## " off column 0
+      if (indent && secs.some((x) => c.from <= x.headTo && c.to >= x.from)) {
+        reshaped = true;
+        continue;
+      }
+      // text inserted at a heading's line start (not a whole line above it) goes to the name's start
+      if (c.from === c.to && c.insert && !c.insert.endsWith('\n')) {
+        const h = secs.find((x) => x.from === c.from);
+        if (h) {
+          reshaped = true;
+          out.push({ from: nameStart(h), to: nameStart(h), insert: c.insert });
+          caret = nameStart(h) + c.insert.length;
+          continue;
+        }
+      }
       if (!single && c.insert === '' && c.to === c.from + 1) {
         const merge =
           secs.some((x) => x.headTo === c.from && c.to <= doc.length && doc.lineAt(c.to).text.trim() !== '') ||

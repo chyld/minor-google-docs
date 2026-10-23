@@ -179,6 +179,7 @@ describe('edits keep headings whole', () => {
     const s = mk(d);
     expect(cleanSlice(s, 0, d.length)).toEqual({ plain: 'Title\nSetup\nbody', raw: d });
     expect(cleanSlice(s, nameAt + 1, nameAt + 4)).toEqual({ plain: 'etu', raw: 'etu' });
+    expect(cleanSlice(s, nameAt, nameAt + 5)).toEqual({ plain: 'Setup', raw: '## {teal} Setup' }); // the whole name keeps the heading
   });
 });
 
@@ -295,5 +296,22 @@ describe('found in review, round 3', () => {
     const d = '## {teal} Title\n## {sky} Real';
     const raw = EditorState.create({ doc: d, extensions: [rawEditing()] }).update({ changes: [{ from: 4, to: 8, insert: 'mint' }], userEvent: 'input.replace' }).state;
     expect(raw.doc.toString()).toBe('## {mint} Title\n## {sky} Real');
+  });
+});
+
+describe('found in review, round 4', () => {
+  const d = 'Title\n## {teal} Setup\nbody';
+  it('Tab (indent) leaves a heading line alone', () => {
+    const s = apply(mk(d, at(d, 'Setup')), { changes: [{ from: at(d, '## '), insert: '  ' }, { from: at(d, 'body'), insert: '  ' }], userEvent: 'input.indent' });
+    expect(s.doc.toString()).toBe('Title\n## {teal} Setup\n  body');
+    expect(sectionsOf(s).length).toBe(1);
+  });
+  it('text inserted at a heading line start goes to the name start', () => {
+    const s = apply(mk(d), { changes: { from: at(d, '## '), insert: 'X' }, userEvent: 'input.paste' });
+    expect(s.doc.toString()).toBe('Title\n## {teal} XSetup\nbody');
+  });
+  it('a line inserted above a heading stays above it', () => {
+    const s = apply(mk(d), { changes: { from: at(d, '## '), insert: 'above\n' }, userEvent: 'input.paste' });
+    expect(s.doc.toString()).toBe('Title\nabove\n## {teal} Setup\nbody');
   });
 });
