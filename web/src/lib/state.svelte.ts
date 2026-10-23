@@ -35,6 +35,7 @@ class AppState {
   theme = $state<Theme>((localStorage.getItem('notes.theme') as Theme) || 'system');
   mono = $state(localStorage.getItem('notes.mono') === '1');
   raw = $state(localStorage.getItem('notes.raw') === '1'); // editor shows the stored text as-is
+  noteSections = $state<{ name: string; color: string }[]>([]); // the open note's sections (palette)
   focusMode = $state(false);
   sidebarOpen = $state(false); // mobile drawer
   // desktop layout (ignored on phones, where one pane shows at a time)

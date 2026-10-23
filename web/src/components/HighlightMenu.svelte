@@ -9,8 +9,10 @@
     onpick: (name: string | null) => void;
     onclose: () => void;
     class?: string;
+    label?: string; // what the colours are for
+    removeLabel?: string;
   }
-  let { current, last, onpick, onclose, class: cls = '' }: Props = $props();
+  let { current, last, onpick, onclose, class: cls = '', label = 'Highlight colours', removeLabel = 'Remove highlight' }: Props = $props();
 
   // light colours, then strong ones; 12 per row (6 on phones, where each row wraps in two)
   const names = [...HL_HUES, ...HL_HUES.map((h) => `${h}-deep`)];
@@ -51,9 +53,9 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="hl-menu {cls}" onmousedown={(e) => e.preventDefault()} onkeydown={onRootKey}>
   {#if current}
-    <button class="hl-remove" onclick={() => onpick(null)}><Icon name="x" size={14} /> Remove highlight</button>
+    <button class="hl-remove" onclick={() => onpick(null)}><Icon name="x" size={14} /> {removeLabel}</button>
   {/if}
-  <div class="hl-grid" role="grid" aria-label="Highlight colours" tabindex="-1" bind:this={grid} {onkeydown}>
+  <div class="hl-grid" role="grid" aria-label={label} tabindex="-1" bind:this={grid} {onkeydown}>
     {#each [0, 1] as r (r)}
       <div role="row">
         {#each names.slice(r * 12, r * 12 + 12) as name, c (name)}

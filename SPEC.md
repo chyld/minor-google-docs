@@ -731,3 +731,77 @@ blank lines.
   on an empty note (the placeholder shows there).
 
 Tests: `web/e2e/endmark.mjs` (browser).
+
+## 22. Sections
+
+A note can be divided into named, coloured sections. Design reviewed by the beta team before building.
+
+- **Grammar.** A line `## {colour} Name` starts a section. `colour` is one of the 24 highlight names and
+  is required. `Name` must not be blank. The line must start at column 0 with exactly `## {`. The section
+  runs to the next heading or the end of the note (flat, no nesting). Anything else stays ordinary text:
+  `## Plain`, `## {see below}`, `#`/`###`, indented lines, an unknown colour. Existing notes are never
+  reinterpreted. The title line (§5.4) is never a section. Text before the first section belongs to no
+  section. Heading lines are never highlights (like image lines). Same grammar in
+  `internal/core/section.go` and `web/src/lib/heading.ts`, both tested against
+  `internal/core/testdata/sections.json`.
+- **Look.**
+  - The heading shows only the name: semibold, 1.2em, in the hue (`--sec-l`/`--sec-c`, contrast-tested
+    ≥ 4.5:1 per hue in both themes against `--bg` and `--surface`), with a thin rule. Space above comes
+    from padding, so the height map stays exact.
+  - Body lines keep normal ink, with no tint, so same-hue highlights stay visible.
+  - A 3px bar in the hue runs down the body, from the line after the heading to the last non-blank
+    line. It is drawn as a CodeMirror layer, so it continues past image widgets.
+  - `## {colour} ` is hidden and atomic. It shows dimmed when the selection touches the heading. It is
+    frozen while the mouse is down, like highlight delimiters.
+  - Forced colours: `CanvasText` heading and bar.
+- **Heading controls.**
+  - An arrow before the name collapses or opens the section.
+  - A ⋯ button after it (shown on hover or when the cursor is on the heading; always on touch screens)
+    opens a menu: Colour… (the 24-swatch grid; "Remove section" there too), Move up, Move down,
+    Collapse/Show, and Remove section (keeps text).
+- **Adding.**
+  - The note-bar "Add section" button (desktop), the ⋯ menu (also on phones) and the palette open the
+    colour grid. The last-used section colour is focused.
+  - Picking a colour inserts `## {colour} New section` after the cursor's line, with "New section"
+    selected for typing. It goes after a selected image. It is never on or above the title line. A
+    blank line becomes the heading.
+  - There is no keyboard shortcut (Ctrl+Shift+S is the browser's Save As). Typing `## ` never creates a
+    section by itself; a completed valid line simply is one.
+- **Edit rules** (filters registered before highlights/images, so those shape an edit first):
+  - The cursor never rests inside `## {colour} `. ArrowLeft from the name's start goes to the line above.
+  - Backspace at the name start, or any deletion reaching into the markup, removes all of it: the
+    heading becomes text and the name stays. Typing inside the markup lands at the name's start.
+  - Enter at the name start opens a line above. Enter at the end starts the body. Enter mid-name moves
+    the rest into the body.
+  - Backspace at the first body line's start, Delete at the heading's end, and Delete at the end of a
+    non-blank line just above a heading move the cursor instead of merging lines.
+  - A heading whose name is deleted loses its markup.
+  - Add, recolour, remove and move are each one undo step.
+  - Replace-all never rewrites the markup, in the rendered view or in raw text (§20).
+- **Moving.** Move up/down swaps the whole section (heading to the line before the next heading) with
+  its neighbour. The text before the first section never moves. The cursor and collapsed state travel
+  with it.
+- **Collapsing.**
+  - Folds the body (heading end → last non-blank line) behind a "⋯ N lines" button.
+  - Kept per note in this browser (`notes.folds.<user>:<note>`, section indexes), never in the file.
+    Restored when the note opens and when leaving raw text.
+  - The cursor or a Find match landing inside opens it (CodeMirror clears folds the selection enters).
+    Raw text shows everything.
+- **Section list.**
+  - The note-bar "Sections" button (desktop; shown when there are sections) and the ⋯ menu's "Sections"
+    list every section with its colour dot. Picking one puts the cursor on the heading, opening it if
+    collapsed, and scrolls it to the top.
+  - The palette has "Go to section: …" for each. This is also the screen-reader navigation path:
+    CodeMirror lines aren't real headings. Moving onto a heading announces "Section, colour, name".
+- **Elsewhere.**
+  - Copy: other apps get the name (`text/plain`); this app keeps the heading (`text/x-notes-raw`).
+  - Title, preview, search index and snippets (`core.SearchText`) and footer counts drop the markup and
+    keep the name.
+  - Export and backups keep the raw text.
+  - The highlight tools are off when the selection touches a heading.
+- **Phones.** The note-bar section buttons are hidden below 560 px. The ⋯ menu has "Add section" and
+  "Sections". Popovers are pinned to the bottom of the screen.
+
+Tests: `internal/core` (fixture, titles/previews/search), `web/src/lib/heading.test.ts` (fixture,
+contrast), `web/src/lib/editor/sections.test.ts` (finding, adding, edit rules, moving, collapsing,
+clipboard), `web/e2e/sections.mjs` (browser).

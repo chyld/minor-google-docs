@@ -3,6 +3,7 @@
 // internal/core/highlight.go; both are checked against internal/core/testdata/highlights.json.
 import { HUES } from './colors';
 import { MARKER_RE } from './ids';
+import { isHeadingLine } from './heading';
 
 /** 12 hues (the tag palette), each light and "-deep": 24 colours. */
 export const HL_HUES = Object.keys(HUES);
@@ -34,7 +35,7 @@ const isMarkerLine = (text: string) => text.startsWith('[image:') && MARKER_RE.t
 
 /** Highlights on one line of text; offsets are relative to `base`. Image lines have none. */
 export function parseLine(text: string, base = 0): Hl[] {
-  if (!text.includes('=={') || isMarkerLine(text)) return [];
+  if (!text.includes('=={') || isMarkerLine(text) || isHeadingLine(text)) return []; // image and section lines are never highlights
   // nextEq[i]: first j >= i where "==" starts
   const n = text.length;
   const nextEq = new Int32Array(n + 1).fill(-1);

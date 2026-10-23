@@ -21,7 +21,9 @@
   import Icon from './Icon.svelte';
   import HighlightMenu from './HighlightMenu.svelte';
   import { hlHue, isHlName, stripHighlights } from '../lib/highlight';
+  import { stripSections } from '../lib/heading';
   import type { HighlightInfo } from '../lib/editor/highlights';
+  import type { SectionInfo } from '../lib/editor/sections';
 
   interface Props {
     id: string;
@@ -56,7 +58,7 @@
 
   const readonly = $derived(!!note?.trashed_at);
   const hasText = $derived(/\S/.test(pending)); // stops at the first visible character: no copy of the note
-  const plain = $derived(app.raw ? counted : stripHighlights(counted)); // counts what is on screen: delimiters only in raw text
+  const plain = $derived(app.raw ? counted : stripSections(stripHighlights(counted))); // counts what is on screen: markup only in raw text
   const words = $derived(wordCount(plain));
   const shownRefs = $derived(refsIn(counted));
   const draftKey = (nid: string) => `${app.me?.id}:${nid}`;
@@ -134,7 +136,7 @@
         claimSaver(live);
         attachSaver(live);
         setText(live.pending);
-        editor?.setDoc(live.pending);
+        show(live.pending);
         goLive(nid);
         void live.flush();
         return;
@@ -144,7 +146,7 @@
       if (d && d.body !== n.body && !n.trashed_at) {
         s.pending = d.body;
         setText(d.body);
-        editor?.setDoc(d.body);
+        show(d.body);
         if (d.base_sha256 === n.sha256) {
           app.toast('Restored unsaved changes from earlier.', 'success');
           s.edit(d.body);
@@ -157,7 +159,7 @@
       // a trashed note keeps its draft: it is offered again if the note is restored
       if (d && !n.trashed_at) drafts.delete(draftKey(nid));
       setText(n.body);
-      editor?.setDoc(n.body, !!n.trashed_at);
+      show(n.body, !!n.trashed_at);
       if (!n.trashed_at) goLive(nid);
       if (!n.body.trim() && !n.trashed_at) {
         await tick(); // the editor is still hidden until the DOM catches up with `note`
@@ -167,6 +169,90 @@
       if (seq !== loadSeq) return;
       loadError = e instanceof ApiError && e.status === 404 ? 'This note no longer exists.' : e instanceof Error ? e.message : String(e);
     }
+  }
+
+  // ---- sections ----
+
+  let sectionList = $state<SectionInfo[]>([]);
+  type Rect = { left: number; top: number; bottom: number; right: number };
+  // one popover at a time: a new section's colour, the list, a heading's menu, or its colour
+  let secPop = $state<{ kind: 'add' | 'list' | 'menu' | 'color'; index: number; rect: Rect } | null>(null);
+  let secPopW = $state(240);
+  let secPopH = $state(120);
+  let secLast = $state<string | null>(isHlName(localStorage.getItem('notes.secLast') ?? '') ? localStorage.getItem('notes.secLast') : null);
+  let moreBtn: HTMLButtonElement | undefined = $state();
+  let restoring = false;
+  const secPos = $derived.by(() => {
+    if (!secPop) return { left: 0, top: 0 };
+    const r = secPop.rect;
+    const left = Math.min(Math.max(8, r.right - secPopW), window.innerWidth - secPopW - 8);
+    const below = r.bottom + 6;
+    const top = below + secPopH <= window.innerHeight - 8 ? below : Math.max(8, r.top - secPopH - 6);
+    return { left, top };
+  });
+
+  // collapsed sections are remembered per note in this browser (never in the file)
+  const foldKey = (nid: string) => `notes.folds.${app.me?.id}:${nid}`;
+  function loadFolds(nid: string): number[] {
+    try {
+      const v = JSON.parse(localStorage.getItem(foldKey(nid)) ?? '[]');
+      return Array.isArray(v) ? v.filter((x) => Number.isInteger(x)) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function onSections(list: SectionInfo[]) {
+    sectionList = list;
+    app.noteSections = list.map(({ name, color }) => ({ name, color }));
+    if (!note || app.raw || restoring) return;
+    const folded = list.flatMap((s, i) => (s.folded ? [i] : []));
+    if (folded.length) localStorage.setItem(foldKey(note.id), JSON.stringify(folded));
+    else localStorage.removeItem(foldKey(note.id));
+  }
+
+  /** Show a note's text (and the sections collapsed last time). */
+  function show(text: string, ro = false) {
+    restoring = true;
+    editor?.setDoc(text, ro);
+    if (note) editor?.setFolds(loadFolds(note.id));
+    restoring = false;
+  }
+
+  const rectOf = (el: Element | null | undefined): Rect => {
+    const r = el?.getBoundingClientRect();
+    return r ? { left: r.left, top: r.top, bottom: r.bottom, right: r.right } : { left: window.innerWidth - 8, right: window.innerWidth - 8, top: 56, bottom: 56 };
+  };
+
+  function openSecPop(kind: 'add' | 'list' | 'menu', index: number, at: Element | Rect | null | undefined) {
+    if (!note || readonly || app.raw) return;
+    secPop = { kind, index, rect: at && 'left' in at && !(at instanceof Element) ? at : rectOf(at as Element) };
+  }
+
+  function closeSecPop() {
+    secPop = null;
+    editor?.focus();
+  }
+
+  function pickSectionColor(name: string | null) {
+    const p = secPop;
+    secPop = null;
+    if (!p) return;
+    if (name) {
+      secLast = name;
+      localStorage.setItem('notes.secLast', name);
+    }
+    if (p.kind === 'add') {
+      if (name) editor.addSection(name);
+    } else if (name) editor.sectionColor(p.index, name);
+    else editor.sectionRemove(p.index);
+  }
+
+  /** Run a menu action on its section (read before the menu closes: closing clears it). */
+  function sectionAction(run: (index: number, s: SectionInfo) => void) {
+    const k = secPop?.index;
+    secPop = null;
+    if (k !== undefined && sectionList[k]) run(k, sectionList[k]);
   }
 
   // ---- editing ----
@@ -203,15 +289,22 @@
     return { left, top };
   });
 
-  // the raw text has no colours to pick: their button goes away, so focus on it (or in the colours)
-  // goes back to the note instead of the page
+  // the raw text has no colours or sections to pick: their buttons go away, so focus on them (or in a
+  // popover) goes back to the note instead of the page. Back in the rendered view, collapsed sections
+  // come back.
   let wasRaw = untrack(() => app.raw);
   $effect(() => {
     const r = app.raw;
     untrack(() => {
-      if (r && !wasRaw && (hlMenu || document.activeElement === document.body)) {
+      if (r && !wasRaw && (hlMenu || secPop || document.activeElement === document.body)) {
         hlMenu = null;
+        secPop = null;
         editor?.focus();
+      }
+      if (!r && wasRaw && note) {
+        restoring = true;
+        editor?.setFolds(loadFolds(note.id));
+        restoring = false;
       }
       wasRaw = r;
     });
@@ -282,7 +375,7 @@
     if (!saver?.conflict) return;
     const body = saver.useTheirs();
     setText(body);
-    editor.setDoc(body);
+    show(body);
   }
 
   async function saveMineAsNew() {
@@ -344,7 +437,7 @@
       app.loadTags();
       // uploads canceled or re-minted while it was in the trash couldn't be saved then
       const fixed = fixRetiredRefs(pending);
-      editor.setDoc(fixed);
+      show(fixed);
       goLive(nid); // upload cancels / ref changes must reach the editor again
       if (fixed !== pending) {
         setText(fixed);
@@ -429,6 +522,12 @@
       app.upsert({ id: note.id, attachment_count: note.attachments.length });
     });
     const onLightbox = (e: Event) => (lightboxRef = (e as CustomEvent).detail.ref);
+    const onSectionMenu = (e: Event) => {
+      const d = (e as CustomEvent).detail;
+      openSecPop('menu', d.index, d.rect);
+    };
+    const onAddSection = () => openSecPop('add', -1, document.querySelector('.note-bar button[aria-label="Add section"]')?.getClientRects().length ? document.querySelector('.note-bar button[aria-label="Add section"]') : moreBtn);
+    const onGotoSection = (e: Event) => editor?.sectionGo((e as CustomEvent).detail);
     const onSave = () => void saveNow();
     const onHide = () => {
       if (document.visibilityState === 'hidden') {
@@ -444,6 +543,9 @@
     };
     const onPageHide = () => unloadAll();
     window.addEventListener('notes:lightbox', onLightbox);
+    window.addEventListener('notes:section-menu', onSectionMenu);
+    window.addEventListener('notes:add-section', onAddSection);
+    window.addEventListener('notes:goto-section', onGotoSection);
     window.addEventListener('notes:save', onSave);
     document.addEventListener('visibilitychange', onHide);
     window.addEventListener('beforeunload', onUnload);
@@ -453,6 +555,10 @@
       if (saver) releaseSaver(saver, () => {});
       offDone();
       window.removeEventListener('notes:lightbox', onLightbox);
+      window.removeEventListener('notes:section-menu', onSectionMenu);
+      window.removeEventListener('notes:add-section', onAddSection);
+      window.removeEventListener('notes:goto-section', onGotoSection);
+      app.noteSections = [];
       window.removeEventListener('notes:save', onSave);
       document.removeEventListener('visibilitychange', onHide);
       window.removeEventListener('beforeunload', onUnload);
@@ -534,6 +640,18 @@
             <HighlightMenu class="hl-pop-bar" current={hl.current} last={hlLast} onpick={pickHighlight} onclose={closeHighlightMenu} />
           {/if}
         </div>
+        <button
+          class="icon-btn hide-phone"
+          title="Add section"
+          aria-label="Add section"
+          aria-haspopup="grid"
+          aria-expanded={secPop?.kind === 'add'}
+          disabled={!hasText}
+          onmousedown={(e) => e.preventDefault()}
+          onclick={(e) => openSecPop('add', -1, e.currentTarget)}><Icon name="section" /></button>
+        {#if sectionList.length}
+          <button class="icon-btn hide-phone" title="Sections" aria-label="Sections" aria-haspopup="menu" aria-expanded={secPop?.kind === 'list'} onclick={(e) => openSecPop('list', -1, e.currentTarget)}><Icon name="toc" /></button>
+        {/if}
         {/if}
         <button class="icon-btn" class:on={note.pinned} title={note.pinned ? 'Unpin' : 'Pin to top'} aria-label={note.pinned ? 'Unpin' : 'Pin to top'} aria-pressed={note.pinned} onclick={() => patch({ pinned: !note!.pinned })}>
           <Icon name="pin" />
@@ -560,11 +678,17 @@
           <button class="btn small danger" onclick={purge}><Icon name="trash" size={15} /> Delete forever</button>
         {:else}
           <div class="menu-wrap">
-            <button class="icon-btn" title="More" aria-label="More actions" aria-haspopup="menu" aria-expanded={menuOpen} onclick={() => (menuOpen = !menuOpen)}><Icon name="more" /></button>
+            <button class="icon-btn" bind:this={moreBtn} title="More" aria-label="More actions" aria-haspopup="menu" aria-expanded={menuOpen} onclick={() => (menuOpen = !menuOpen)}><Icon name="more" /></button>
             {#if menuOpen}
               <button class="menu-scrim" tabindex="-1" aria-hidden="true" onclick={() => (menuOpen = false)}></button>
               <div class="menu menu-right" role="menu" use:menu={{ onclose: () => (menuOpen = false) }}>
                 <button role="menuitem" data-first onclick={duplicate}><Icon name="copy" size={16} /> Duplicate</button>
+                {#if !app.raw}
+                  <button role="menuitem" disabled={!hasText} onclick={() => ((menuOpen = false), openSecPop('add', -1, moreBtn))}><Icon name="section" size={16} /> Add section</button>
+                  {#if sectionList.length}
+                    <button role="menuitem" onclick={() => ((menuOpen = false), openSecPop('list', -1, moreBtn))}><Icon name="toc" size={16} /> Sections</button>
+                  {/if}
+                {/if}
                 <button role="menuitemcheckbox" aria-checked={app.raw} onclick={() => ((menuOpen = false), toggleRaw())}><Icon name="code" size={16} /> Raw text</button>
                 <button role="menuitem" onclick={() => ((menuOpen = false), app.setMono(!app.mono))}><Icon name="type" size={16} /> {app.mono ? 'Proportional font' : 'Monospace font'}</button>
                 <button role="menuitem" onclick={() => ((menuOpen = false), (app.focusMode = !app.focusMode))}><Icon name="focus" size={16} /> {app.focusMode ? 'Exit focus mode' : 'Focus mode'}</button>
@@ -604,7 +728,7 @@
           <div class="note-skeleton" aria-hidden="true"><span></span><span></span><span></span></div>
         {/if}
         <div class:invisible={!note}>
-          <Editor bind:this={editor} raw={app.raw} {onchange} onfiles={handleFiles} onsave={saveNow} onblur={saveNow} onselection={onSelectionInfo} onhighlightkey={openHighlightMenu} />
+          <Editor bind:this={editor} raw={app.raw} onsections={onSections} {onchange} onfiles={handleFiles} onsave={saveNow} onblur={saveNow} onselection={onSelectionInfo} onhighlightkey={openHighlightMenu} />
         </div>
         {#if note && hasText}
           <!-- end of the note: drawn, never part of the text -->
@@ -659,6 +783,40 @@
         <HighlightMenu current={hl.current} last={hlLast} onpick={pickHighlight} onclose={closeHighlightMenu} />
       </div>
     {/if}
+  {/if}
+
+  {#if secPop}
+    <button class="menu-scrim" tabindex="-1" aria-hidden="true" onmousedown={(e) => e.preventDefault()} onclick={closeSecPop}></button>
+    <div class="sec-pop" style="left:{secPos.left}px; top:{secPos.top}px" bind:offsetWidth={secPopW} bind:offsetHeight={secPopH}>
+      {#if secPop.kind === 'add' || secPop.kind === 'color'}
+        <HighlightMenu
+          label={secPop.kind === 'add' ? 'New section colour' : 'Section colour'}
+          removeLabel="Remove section (keeps its text)"
+          current={secPop.kind === 'color' ? (sectionList[secPop.index]?.color ?? null) : null}
+          last={secLast}
+          onpick={pickSectionColor}
+          onclose={closeSecPop} />
+      {:else if secPop.kind === 'list'}
+        <div class="menu sec-list" role="menu" aria-label="Sections" use:menu={{ onclose: () => (secPop = null) }}>
+          {#each sectionList as s, i (i)}
+            <button role="menuitem" onclick={() => ((secPop = null), editor.sectionGo(i))}>
+              <span class="sec-dot" style="--h:{hlHue(s.color)}" aria-hidden="true"></span><span class="grow">{s.name}</span>{#if s.folded}<span class="muted small">collapsed</span>{/if}
+            </button>
+          {/each}
+        </div>
+      {:else}
+        {@const i = secPop.index}
+        {@const s = sectionList[i]}
+        <div class="menu" role="menu" aria-label="Section {s?.name ?? ''}" use:menu={{ onclose: () => (secPop = null) }}>
+          <button role="menuitem" data-first onclick={() => secPop && (secPop = { ...secPop, kind: 'color' })}><span class="sec-dot" style="--h:{hlHue(s?.color ?? 'teal')}" aria-hidden="true"></span> Colour…</button>
+          <button role="menuitem" disabled={i === 0} onclick={() => sectionAction((k) => editor.sectionMove(k, -1))}><Icon name="up" size={16} /> Move up</button>
+          <button role="menuitem" disabled={i >= sectionList.length - 1} onclick={() => sectionAction((k) => editor.sectionMove(k, 1))}><Icon name="down" size={16} /> Move down</button>
+          <button role="menuitem" disabled={!s?.foldable} onclick={() => sectionAction((k, x) => (editor.sectionFold(k, !x.folded), editor.focus()))}><Icon name="fold" size={16} /> {s?.folded ? 'Show section' : 'Collapse section'}</button>
+          <hr />
+          <button role="menuitem" class="danger" onclick={() => sectionAction((k) => editor.sectionRemove(k))}><Icon name="x" size={16} /> Remove section <span class="muted small">keeps text</span></button>
+        </div>
+      {/if}
+    </div>
   {/if}
 
   {#if lightboxRef && lightboxImages.length}

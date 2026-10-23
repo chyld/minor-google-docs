@@ -22,6 +22,12 @@
     { kind: 'action', id: 'new', label: 'New note', icon: 'plus', hint: 'Alt N', run: () => app.newNote() },
     { kind: 'action', id: 'theme', label: 'Toggle dark mode', icon: 'moon', run: () => app.setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark') },
     { kind: 'action', id: 'trash', label: 'Go to trash', icon: 'trash', run: () => app.setView('trash') },
+    ...(app.selectedId && !app.raw
+      ? ([
+          { kind: 'action', id: 'add-section', label: 'Add section', icon: 'section', run: () => window.dispatchEvent(new CustomEvent('notes:add-section')) },
+          ...app.noteSections.map((s, i) => ({ kind: 'action', id: `section-${i}`, label: `Go to section: ${s.name}`, icon: 'toc', run: () => window.dispatchEvent(new CustomEvent('notes:goto-section', { detail: i })) })),
+        ] as Item[])
+      : []),
     { kind: 'action', id: 'raw', label: `Raw text${app.raw ? ' (on)' : ''}`, icon: 'code', hint: 'Ctrl /', run: () => app.setRaw(!app.raw) },
     { kind: 'action', id: 'focus', label: 'Toggle focus mode', icon: 'focus', hint: 'Ctrl ⇧ F', run: () => (app.focusMode = !app.focusMode) },
     ...(app.desktop

@@ -290,3 +290,44 @@ func TestHighlightsInTitlesAndPreviews(t *testing.T) {
 		t.Fatalf("search text %q", got)
 	}
 }
+
+func TestSectionsSharedFixture(t *testing.T) {
+	raw, err := os.ReadFile("testdata/sections.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fx struct {
+		Headings []struct{ Line, Color, Name string }
+		Strip    []struct{ In, Out string }
+	}
+	if err := json.Unmarshal(raw, &fx); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range fx.Headings {
+		color, name, ok := ParseSection(c.Line)
+		if ok != (c.Color != "") || color != c.Color || name != c.Name {
+			t.Errorf("ParseSection(%q) = %q, %q, %v; want %q, %q", c.Line, color, name, ok, c.Color, c.Name)
+		}
+	}
+	for _, c := range fx.Strip {
+		if got := StripSections(c.In); got != c.Out {
+			t.Errorf("StripSections(%q) = %q, want %q", c.In, got, c.Out)
+		}
+	}
+}
+
+func TestSectionsInTitlesPreviewsAndSearch(t *testing.T) {
+	body := "## {teal} Router\n## {sky} Network\nIP =={amber}10.0.0.1==\n## Plain stays"
+	if got := DeriveTitle(body); got != "Router" {
+		t.Fatalf("title %q", got)
+	}
+	if got := DerivePreview(body); got != "Network IP 10.0.0.1 ## Plain stays" {
+		t.Fatalf("preview %q", got)
+	}
+	if got := SearchText(body); got != "Router\nNetwork\nIP 10.0.0.1\n## Plain stays" {
+		t.Fatalf("search text %q", got)
+	}
+	if got := StripHighlights("## {teal} =={amber}x=="); got != "## {teal} =={amber}x==" {
+		t.Fatalf("a heading line is never a highlight: %q", got)
+	}
+}

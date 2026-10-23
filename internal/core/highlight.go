@@ -30,19 +30,20 @@ var highlightRe = func() *regexp.Regexp {
 }()
 
 // StripHighlights removes highlight delimiters, keeping the highlighted text.
-// Image marker lines are never highlights and are left as they are.
+// Image marker lines and section headings are never highlights and are left as they are.
 func StripHighlights(s string) string {
 	if !strings.Contains(s, "=={") {
 		return s
 	}
 	lines := strings.Split(s, "\n")
 	for i, l := range lines {
-		if strings.Contains(l, "=={") && !IsMarker(l) {
+		if strings.Contains(l, "=={") && !IsMarker(l) && !IsSection(l) {
 			lines[i] = highlightRe.ReplaceAllString(l, "$2")
 		}
 	}
 	return strings.Join(lines, "\n")
 }
 
-// SearchText is what the search index and snippets see: no image markers, no highlight delimiters.
-func SearchText(body string) string { return StripHighlights(StripMarkers(body)) }
+// SearchText is what the search index and snippets see: no image markers, no highlight
+// delimiters, no section markup (the section names stay).
+func SearchText(body string) string { return StripSections(StripHighlights(StripMarkers(body))) }

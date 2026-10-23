@@ -1,0 +1,27 @@
+{
+  "headings": [
+    { "line": "## {teal} Server setup", "color": "teal", "name": "Server setup" },
+    { "line": "## {coral-deep} Logs", "color": "coral-deep", "name": "Logs" },
+    { "line": "## {teal}  two spaces", "color": "teal", "name": " two spaces" },
+    { "line": "## {teal} =={amber}x== stays text", "color": "teal", "name": "=={amber}x== stays text" },
+    { "line": "## Plain heading" },
+    { "line": "## {see below} not a colour" },
+    { "line": "## {purple} unknown colour" },
+    { "line": "## {teal}" },
+    { "line": "## {teal} " },
+    { "line": "## {teal}    " },
+    { "line": "## {teal}Name" },
+    { "line": " ## {teal} indented" },
+    { "line": "# {teal} one hash" },
+    { "line": "### {teal} three hashes" },
+    { "line": "##{teal} no space" },
+    { "line": "## {Teal} capitals" },
+    { "line": "## {teal-deeper} nope" }
+  ],
+  "strip": [
+    { "in": "Title\n## {teal} Server setup\nbody", "out": "Title\nServer setup\nbody" },
+    { "in": "## Plain\n## {nope} x", "out": "## Plain\n## {nope} x" },
+    { "in": "## {sky} A\n## {pink-deep} B", "out": "A\nB" },
+    { "in": "no sections here", "out": "no sections here" }
+  ]
+}

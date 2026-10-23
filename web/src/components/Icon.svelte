@@ -43,6 +43,11 @@
     width: 'M3 12h18M7 8l-4 4 4 4M17 8l4 4-4 4',
     highlight: 'M14 4l6 6-8.5 8.5H6v-5.5L14 4zM9 9l6 6M3 21h9',
     code: 'M8 7l-5 5 5 5M16 7l5 5-5 5M13.5 5l-3 14',
+    section: 'M4 5v14M8 6h12M8 11h9M8 15h11M8 19h7',
+    toc: 'M4 6h16M8 12h12M8 18h12M4 12h.01M4 18h.01',
+    up: 'M12 19V5M6 11l6-6 6 6',
+    down: 'M12 5v14M6 13l6 6 6-6',
+    fold: 'M6 9l6 6 6-6',
   };
 </script>
 

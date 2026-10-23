@@ -6,6 +6,9 @@
   import { search, searchKeymap, searchPanelOpen } from '@codemirror/search';
   import { markers } from '../lib/editor/markers';
   import { rawEditing } from '../lib/editor/raw';
+  import { foldEffect, unfoldEffect } from '@codemirror/language';
+  import { type SectionInfo, foldedSections, gotoSection, insertSection, isFolded, moveSection, recolorSection, removeSection, restoreFolds, sections, sectionsOf, setFolded } from '../lib/editor/sections';
+  import { isHeadingLine } from '../lib/heading';
   import { imageEditing, imageLineRange, imageOp, initialSelection, isImageLine, selectedImage, textPos } from '../lib/editor/images';
   import { applyHighlight, highlightAt, highlights, type HighlightInfo } from '../lib/editor/highlights';
   import { stamp } from '../lib/format';
@@ -20,8 +23,11 @@
     onblur: () => void;
     onselection?: (info: HighlightInfo) => void;
     onhighlightkey?: () => void;
+    /** the note's sections changed (added, renamed, recoloured, moved, collapsed) */
+    onsections?: (list: SectionInfo[]) => void;
   }
-  let { readonly = false, raw = false, onchange, onfiles, onsave, onblur, onselection, onhighlightkey }: Props = $props();
+
+  let { readonly = false, raw = false, onchange, onfiles, onsave, onblur, onselection, onhighlightkey, onsections }: Props = $props();
   let dragging = false;
 
   let host: HTMLDivElement;
@@ -32,6 +38,8 @@
   const rich = new Compartment(); // what turns the stored text into the rendered note
   const richExt = [
     markers(),
+    // filters run last-registered first: image and highlight rules shape an edit before the section rules see it
+    sections(),
     // highlights first: transaction filters run last-registered first, so the image rules shape an
     // edit (e.g. a dropped image gets its own line) before highlights split around the result
     highlights(),
@@ -91,6 +99,7 @@
           queueMicrotask(recheckSelection); // history restores cursors without the edit rules
         }
         if (u.selectionSet || u.docChanged || u.focusChanged || u.geometryChanged) report();
+        if (u.docChanged || u.startState.facet(EditorState.readOnly) !== u.state.facet(EditorState.readOnly) || u.transactions.some((t) => t.reconfigured || t.effects.some((e) => e.is(foldEffect) || e.is(unfoldEffect)))) reportSections();
       }),
       EditorView.domEventHandlers({
         paste(e) {
@@ -161,6 +170,7 @@
     const doc = EditorState.create({ doc: text }).doc;
     const selection = untrack(() => raw) ? EditorSelection.single(0) : initialSelection(doc);
     view.setState(EditorState.create({ doc, selection, extensions: extensions(ro) }));
+    reportSections();
   }
 
   function highlightInfo(): HighlightInfo {
@@ -170,11 +180,62 @@
     const focused = view.hasFocus;
     if (st.readOnly || raw || selectedImage(st)) return { ...none, focused };
     const r = st.selection.main;
+    for (let pos = r.from; pos <= r.to; ) {
+      const l = st.doc.lineAt(pos);
+      if (isHeadingLine(l.text)) return { ...none, focused }; // section headings take no highlights
+      pos = l.to + 1;
+    }
     const h = highlightAt(st);
     const current = h && r.from >= h.from && r.to <= h.to ? h.name : null;
     if (r.empty) return { ...none, can: !!h, current, focused };
     const c = view.coordsAtPos(r.from, 1);
     return { can: true, empty: false, current, focused, dragging, rect: c ? { left: c.left, top: c.top, bottom: c.bottom } : null };
+  }
+
+  // ---- sections ----
+
+  let lastSections = '';
+  function reportSections() {
+    if (!view || !onsections) return;
+    const st = view.state;
+    const list: SectionInfo[] = untrack(() => raw) ? [] : sectionsOf(st).map((s) => ({ name: s.name, color: s.color, folded: isFolded(st, s), foldable: s.bodyEnd > s.headTo }));
+    const key = JSON.stringify(list);
+    if (key === lastSections) return;
+    lastSections = key;
+    onsections(list);
+  }
+
+  /** Start a section after the cursor's line, in this colour (the name is selected for typing). */
+  export function addSection(color: string): boolean {
+    if (!view || untrack(() => raw)) return false;
+    const done = insertSection(view, color);
+    view.focus();
+    return done;
+  }
+  export function sectionColor(index: number, color: string) {
+    if (view) recolorSection(view, index, color);
+    view?.focus();
+  }
+  export function sectionRemove(index: number) {
+    if (view) removeSection(view, index);
+    view?.focus();
+  }
+  export function sectionMove(index: number, dir: -1 | 1) {
+    if (view) moveSection(view, index, dir);
+    view?.focus();
+  }
+  export function sectionGo(index: number) {
+    if (view) gotoSection(view, index);
+  }
+  export function sectionFold(index: number, fold: boolean) {
+    if (view) setFolded(view, index, fold);
+  }
+  /** Indexes of collapsed sections, and restoring them (kept per note by the parent). */
+  export function getFolds(): number[] {
+    return view && !untrack(() => raw) ? foldedSections(view.state) : [];
+  }
+  export function setFolds(indexes: number[]) {
+    if (view && !untrack(() => raw)) restoreFolds(view, indexes);
   }
 
   /** Tell the parent about the selection again (e.g. after its scroll container moved). */

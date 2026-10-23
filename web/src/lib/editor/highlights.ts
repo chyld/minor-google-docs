@@ -21,6 +21,7 @@ import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate
 import { isolateHistory } from '@codemirror/commands';
 import { hlDeep, hlHue, lineRuns, parseLine, recolor, serialize, stripHighlights, writeLine, type Hl } from '../highlight';
 import { MARKER_RE } from '../ids';
+import { headingSlice, isHeadingLine, stripSections } from '../heading';
 import { imageOp, isImageLine } from './images';
 
 /** Our own highlight edits: the guard and the selection normaliser leave them alone. */
@@ -321,7 +322,7 @@ const guard = EditorState.transactionFilter.of((tr): TransactionSpec | readonly 
       if (i) text += '\n';
       starts.push(text.length);
       const plainSeg = serialize(seg, Array(seg.length).fill(null));
-      const out = MARKER_RE.test(seg) ? plainSeg : (writeLine(seg, Array(seg.length).fill(h.name)) ?? plainSeg);
+      const out = MARKER_RE.test(seg) || isHeadingLine(seg) ? plainSeg : (writeLine(seg, Array(seg.length).fill(h.name)) ?? plainSeg);
       outs.push(out);
       text += out.text;
     });
@@ -381,12 +382,20 @@ export function cleanSlice(state: EditorState, from: number, to: number): { plai
   let raw = '';
   for (let pos = from; ; ) {
     const line = doc.lineAt(pos);
-    const runs = lineRuns(line.text);
-    const ps = runs.toPlain(Math.max(from, line.from) - line.from);
-    const pe = runs.toPlain(Math.min(to, line.to) - line.from);
-    const p = runs.plain.slice(ps, pe);
-    plain += p;
-    raw += serialize(p, runs.colors.slice(ps, pe)).text;
+    const a = Math.max(from, line.from) - line.from;
+    const b = Math.min(to, line.to) - line.from;
+    const head = headingSlice(line.text, a, b); // a section heading: other apps get just its name
+    if (head) {
+      plain += head.plain;
+      raw += head.raw;
+    } else {
+      const runs = lineRuns(line.text);
+      const ps = runs.toPlain(a);
+      const pe = runs.toPlain(b);
+      const p = runs.plain.slice(ps, pe);
+      plain += p;
+      raw += serialize(p, runs.colors.slice(ps, pe)).text;
+    }
     if (line.to >= to) break;
     plain += '\n';
     raw += '\n';
@@ -408,7 +417,7 @@ const copyOut = EditorView.clipboardOutputFilter.of((text, state) => {
   else if (text === state.sliceDoc(main.from, main.to)) parts = [cleanSlice(state, main.from, main.to)];
   if (!parts) {
     lastCopy = null;
-    return stripHighlights(text);
+    return stripSections(stripHighlights(text));
   }
   const plain = parts.map((p) => p.plain).join(br);
   const raw = parts.map((p) => p.raw).join(br);
@@ -496,7 +505,7 @@ export function applyHighlight(view: Pick<EditorView, 'state' | 'dispatch'>, nam
     const a = Math.max(from, line.from) - line.from;
     const b = Math.min(to, line.to) - line.from;
     pos = line.to + 1;
-    if (isImageLine(line) || a >= b) continue;
+    if (isImageLine(line) || isHeadingLine(line.text) || a >= b) continue; // never inside images or section headings
     const runs = lineRuns(line.text);
     const res = recolor(runs, runs.toPlain(a), runs.toPlain(b), name);
     if (!res) continue;
