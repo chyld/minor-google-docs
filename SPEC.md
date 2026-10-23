@@ -716,10 +716,14 @@ blank lines.
 - **Not text.** It sits outside the editor (`.note-end` in `NoteView.svelte`), is `aria-hidden`, and can't
   be selected, copied, searched or saved.
 - **Colour.** The note's accent hue (first tag; violet by default) at reduced opacity, in both themes;
-  `GrayText` in forced-colours mode.
-- **Click.** Clicking it, or the empty page under the note (not the side margins), puts the cursor at
-  the end of the note: `focus(true)`, so a note ending with an image selects that image and typing
-  starts a new line under it. The keyboard has Ctrl+End.
+  full-strength `GrayText` in forced-colours mode.
+- **Click.** A plain left click (or tap) on it, or on the empty space under the note in line with the
+  text (anywhere down to the bottom of the scroll area, not the side margins), puts the cursor at the
+  end of the note: `focus(true)`, so in the rendered view a note ending with an image selects that image
+  and typing starts a new line under it; in raw text the cursor goes to the very end of the text. Only
+  a click that also *started* there counts (press and release within a few pixels): a drag-selection
+  from the text that ends below keeps its selection, and Shift/Ctrl/Alt/Meta clicks are left alone.
+  Nothing happens on trashed (read-only) notes (`cursor: default` there). The keyboard has Ctrl+End.
 - **When.** Every note with non-blank text, rendered or raw, read-only or not, desktop and phone; hidden
   on an empty note (the placeholder shows there).
 

@@ -216,13 +216,28 @@
     });
   });
 
-  /** A click on the end mark or the empty page under the note puts the cursor at the end. */
-  function clickBelow(e: MouseEvent) {
-    if (!note || e.button !== 0) return;
+  // A plain click on the end mark, or on the empty space under the note (in line with the text, not
+  // the side margins), puts the cursor at the end. Only a click that also started there: a drag from the
+  // text that ends below must keep its selection.
+  let pressBelow: { x: number; y: number } | null = null;
+
+  function isBelow(e: MouseEvent): boolean {
+    if (!note || readonly || e.button !== 0 || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return false;
     const t = e.target as HTMLElement;
-    const host = t.closest('.page')?.querySelector('.editor-host');
-    const below = t === e.currentTarget && !!host && e.clientY > host.getBoundingClientRect().bottom;
-    if (below || t.closest('.note-end')) editor.focus(true);
+    if (t.closest('.note-end')) return true;
+    if (t.closest('.cm-editor, .note-tags, button, input, a, [role="menu"]')) return false;
+    const host = scroller?.querySelector('.editor-host')?.getBoundingClientRect();
+    return !!host && e.clientY > host.bottom && e.clientX >= host.left && e.clientX <= host.right;
+  }
+
+  function pressScroll(e: MouseEvent) {
+    pressBelow = isBelow(e) ? { x: e.clientX, y: e.clientY } : null;
+  }
+
+  function clickScroll(e: MouseEvent) {
+    const p = pressBelow;
+    pressBelow = null;
+    if (p && isBelow(e) && Math.hypot(e.clientX - p.x, e.clientY - p.y) < 6) editor.focus(true);
   }
 
   function toggleRaw() {
@@ -575,9 +590,9 @@
       <div class="trash-banner"><Icon name="trash" size={16} /> This note is in the trash{app.trashDays > 0 ? ` and will be deleted after ${app.trashDays} days` : ''}. Restore it to edit.</div>
     {/if}
 
-    <div class="note-scroll" bind:this={scroller} onscroll={() => editor?.report()}>
-      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions (mouse-only shortcut; the keyboard has Ctrl+End) -->
-      <div class="page" class:mono={app.mono} onclick={clickBelow}>
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions (a mouse shortcut; the keyboard has Ctrl+End) -->
+    <div class="note-scroll" bind:this={scroller} onscroll={() => editor?.report()} onmousedown={pressScroll} onclick={clickScroll}>
+      <div class="page" class:mono={app.mono}>
         {#if note}
           <div class="note-tags">
             <TagInput tagIds={note.tag_ids} disabled={readonly} onchange={(ids) => patch({ tag_ids: ids })} />

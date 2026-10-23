@@ -1240,9 +1240,13 @@ input:focus {
   stroke-linecap: round;
   opacity: 0.55;
 }
+.note.trashed .note-end {
+  cursor: default;
+}
 @media (forced-colors: active) {
   .note-end svg {
     stroke: GrayText;
+    opacity: 1;
   }
 }
 .note-foot {

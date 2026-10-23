@@ -62,6 +62,57 @@ await page.mouse.click(side.x, side.y);
 await settle();
 check('a click in the side margin does not jump to the end', await page.evaluate(() => __v.state.selection.main.head !== __v.state.doc.length));
 
+// ---- found in review: only a real click there jumps ----
+const sel = () => page.evaluate(() => ({ from: __v.state.selection.main.from, to: __v.state.selection.main.to }));
+const hostBox = () => page.evaluate(() => document.querySelector('.editor-host').getBoundingClientRect().toJSON());
+{
+  // a drag from the text that ends below the note keeps its selection
+  const start = await page.evaluate(() => {
+    const r = document.querySelectorAll('.cm-line')[1].getBoundingClientRect();
+    return { x: r.left + 4, y: r.top + r.height / 2 };
+  });
+  const end = await box();
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(end.x + end.width / 2, end.y + end.height + 20, { steps: 8 });
+  await page.mouse.up();
+  await settle();
+  const s1 = await sel();
+  check('a drag from the text ending below the note keeps its selection', s1.to - s1.from > 5, s1);
+
+  // Shift+click below extends the selection instead of jumping
+  await page.evaluate(() => __v.dispatch({ selection: { anchor: 3 } }));
+  const wb = await box();
+  await page.keyboard.down('Shift');
+  await page.mouse.click(wb.x + wb.width / 2, wb.y + wb.height / 2);
+  await page.keyboard.up('Shift');
+  await settle();
+  check('Shift+click on the wave does not collapse to the end', (await sel()).from === 3 || (await sel()).to - (await sel()).from > 0, await sel());
+
+  // the side margins under the note don't jump either
+  await page.evaluate(() => (__v.focus(), __v.dispatch({ selection: { anchor: 3 } })));
+  const hb = await hostBox();
+  await page.mouse.click(hb.left - 20, hb.bottom + 30);
+  await settle();
+  check('a click in the side margin under the note does not jump', (await sel()).from === 3, await sel());
+
+  // a short note in a tall window: the whole empty area below counts
+  await page.setViewportSize({ width: 1280, height: 1600 });
+  await settle();
+  await page.evaluate(() => (__v.focus(), __v.dispatch({ selection: { anchor: 3 } })));
+  const far = await page.evaluate(() => {
+    const h = document.querySelector('.editor-host').getBoundingClientRect();
+    const sc = document.querySelector('.note-scroll').getBoundingClientRect();
+    const pg = document.querySelector('.page').getBoundingClientRect();
+    return { x: h.left + 30, y: sc.bottom - 30, outsidePage: sc.bottom - 30 > pg.bottom };
+  });
+  await page.mouse.click(far.x, far.y);
+  await settle();
+  check('in a tall window, a click far below a short note goes to the end', far.outsidePage && (await page.evaluate(() => __v.state.selection.main.head === __v.state.doc.length)), far);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await settle();
+}
+
 // ---- grows with the text, follows the editor ----
 const y0 = (await box()).y;
 await page.evaluate(() => (__v.focus(), __v.dispatch({ selection: { anchor: __v.state.doc.length } })));
@@ -82,6 +133,26 @@ check('after a final image, clicking the wave selects the image', await page.eva
 }));
 await page.keyboard.type('caption below');
 check('…and typing starts a line under it', (await doc()).endsWith('.png\ncaption below'), await doc());
+
+// in raw text the cursor goes to the true end of the text (the image line is just text there)
+await page.keyboard.press('Control+/');
+await settle();
+const rb = await box();
+await page.mouse.click(rb.x + rb.width / 2, rb.y + rb.height / 2);
+await settle();
+check('raw text: clicking the wave puts the cursor at the very end', await page.evaluate(() => __v.state.selection.main.empty && __v.state.selection.main.head === __v.state.doc.length));
+await page.keyboard.press('Control+/');
+
+// trashed notes show the wave, but clicking it does nothing
+const trashed = await makeNote(['Old note', 'body text']);
+await page.evaluate(async (id) => fetch(`/api/notes/${id}`, { method: 'PATCH', headers: { 'X-Requested-With': 'notes', 'Content-Type': 'application/json' }, body: JSON.stringify({ trashed: true }) }), trashed);
+await open(trashed);
+check('a trashed note shows the wave', await shown());
+await page.evaluate(() => __v.dispatch({ selection: { anchor: 2 } }));
+const tb = await box();
+await page.mouse.click(tb.x + tb.width / 2, tb.y + tb.height / 2);
+await settle();
+check('…clicking it there does nothing (read-only)', (await page.evaluate(() => __v.state.selection.main.head)) === 2 && (await page.evaluate((m) => getComputedStyle(document.querySelector(m)).cursor, mark)) === 'default');
 
 // ---- not on an empty note; in raw text too ----
 const empty = await makeNote(['']);
