@@ -55,6 +55,7 @@
   let popH = $state(110);
 
   const readonly = $derived(!!note?.trashed_at);
+  const hasText = $derived(/\S/.test(pending)); // stops at the first visible character: no copy of the note
   const plain = $derived(app.raw ? counted : stripHighlights(counted)); // counts what is on screen: delimiters only in raw text
   const words = $derived(wordCount(plain));
   const shownRefs = $derived(refsIn(counted));
@@ -605,7 +606,7 @@
         <div class:invisible={!note}>
           <Editor bind:this={editor} raw={app.raw} {onchange} onfiles={handleFiles} onsave={saveNow} onblur={saveNow} onselection={onSelectionInfo} onhighlightkey={openHighlightMenu} />
         </div>
-        {#if note && pending.trim()}
+        {#if note && hasText}
           <!-- end of the note: drawn, never part of the text -->
           <div class="note-end" aria-hidden="true">
             <svg width="46" height="12" viewBox="0 0 46 12"><path d="M2 6c4-5 7-5 11 0s7 5 10 0 7-5 10 0 7 5 11 0" /></svg>
