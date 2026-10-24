@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"io"
 	"io/fs"
@@ -36,13 +37,14 @@ type Attachment struct {
 	State     string `json:"state"`
 	CreatedAt int64  `json:"created_at"`
 	Inline    bool   `json:"inline"`
+	Ext       string `json:"-"` // disk extension ("" until the type is sniffed at finalize)
 }
 
-const attCols = `id,ref,note_id,filename,mime,size_bytes,state,created_at`
+const attCols = `id,ref,note_id,filename,mime,ext,size_bytes,state,created_at`
 
 func scanAtt(sc interface{ Scan(...any) error }) (Attachment, error) {
 	var a Attachment
-	err := sc.Scan(&a.ID, &a.Ref, &a.NoteID, &a.Filename, &a.Mime, &a.SizeBytes, &a.State, &a.CreatedAt)
+	err := sc.Scan(&a.ID, &a.Ref, &a.NoteID, &a.Filename, &a.Mime, &a.Ext, &a.SizeBytes, &a.State, &a.CreatedAt)
 	a.Inline = InlineImageTypes[a.Mime]
 	return a, err
 }
@@ -122,16 +124,46 @@ func (s *Store) CreateUpload(ctx context.Context, uid string, m UploadMeta) (*At
 	t := now()
 	a := &Attachment{ID: m.ID, Ref: m.Ref, NoteID: m.NoteID, Filename: SanitizeFilename(m.Filename),
 		Mime: "application/octet-stream", SizeBytes: m.Length, State: "uploading", CreatedAt: t}
-	_, err = s.DB.W.ExecContext(ctx, `INSERT INTO attachments(`+attCols+`,user_id,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		a.ID, a.Ref, a.NoteID, a.Filename, a.Mime, a.SizeBytes, a.State, a.CreatedAt, uid, t)
-	if err != nil {
+	if err := s.insertNewRef(ctx, uid, a, ""); err != nil {
 		os.Remove(s.tmpPath(uid, m.ID))
-		if strings.Contains(err.Error(), "UNIQUE") || strings.Contains(err.Error(), "PRIMARY KEY") {
-			return nil, ErrRefTaken
-		}
 		return nil, err
 	}
 	return a, nil
+}
+
+// insertNewRef claims a's ref for a new image and inserts its row, atomically:
+// a ref used anywhere by the user (even by a deleted image) is refused with
+// ErrRefTaken, so one ref always means one image content.
+func (s *Store) insertNewRef(ctx context.Context, uid string, a *Attachment, sha string) error {
+	tx, err := s.DB.W.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`INSERT INTO ref_content(user_id,ref,sha256) VALUES(?,?,?) ON CONFLICT DO NOTHING`, uid, a.Ref, sha)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrRefTaken
+	}
+	if err := insertAtt(tx, uid, a, sha); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func insertAtt(tx *sql.Tx, uid string, a *Attachment, sha string) error {
+	var sum any
+	if sha != "" {
+		sum = sha
+	}
+	_, err := tx.Exec(`INSERT INTO attachments(`+attCols+`,user_id,updated_at,sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		a.ID, a.Ref, a.NoteID, a.Filename, a.Mime, a.Ext, a.SizeBytes, a.State, a.CreatedAt, uid, a.CreatedAt, sum)
+	if err != nil && (strings.Contains(err.Error(), "UNIQUE") || strings.Contains(err.Error(), "PRIMARY KEY")) {
+		return ErrRefTaken
+	}
+	return err
 }
 
 func (s *Store) getAtt(ctx context.Context, uid, id string) (*Attachment, error) {
@@ -164,7 +196,10 @@ func (s *Store) uploadOffset(ctx context.Context, uid, id string) (*Attachment, 
 		if st, err := os.Stat(s.tmpPath(uid, id)); err == nil {
 			return a, st.Size(), nil
 		}
-		st, err := os.Stat(s.filePath(uid, id))
+		if a.Ext == "" {
+			return nil, 0, ErrNotFound // never reached finalize
+		}
+		st, err := os.Stat(s.attPath(uid, a))
 		if err != nil {
 			return nil, 0, ErrNotFound
 		}
@@ -363,32 +398,39 @@ func (s *Store) AppendUpload(ctx context.Context, uid, id string, offset int64, 
 	return a, cur, nil
 }
 
-// finalize sniffs the type, moves bytes into users/<uid>/files and marks the row
-// ready. Caller holds the attachment lock. Safe to repeat (see UploadOffset).
+// finalize sniffs the type, records the type and disk extension on the row, then
+// moves the bytes into the note's files/ folder and marks the row ready. The
+// extension is stored first so a crash after the move can still find the file.
+// Caller holds the attachment lock. Safe to repeat (see UploadOffset).
 func (s *Store) finalize(ctx context.Context, uid string, a *Attachment) error {
 	tmp := s.tmpPath(uid, a.ID)
-	f, err := os.Open(tmp)
+	head, err := readHead(tmp)
 	if err != nil {
 		return err
 	}
-	f.Close()
-	if err := fsx.MoveDurable(tmp, s.filePath(uid, a.ID)); err != nil {
+	a.Mime, a.Ext = detectMime(head, a.Filename), sniffExt(head)
+	res, err := s.DB.W.ExecContext(ctx, `UPDATE attachments SET mime=?, ext=?, updated_at=? WHERE id=? AND user_id=? AND state='uploading'`,
+		a.Mime, a.Ext, now(), a.ID, uid)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		os.Remove(tmp) // purged or canceled meanwhile
+		return ErrNotFound
+	}
+	if err := s.ensureFilesDir(uid, a.NoteID); err != nil {
+		os.Remove(tmp) // the note was purged: don't recreate its folder
+		return ErrNotFound
+	}
+	if err := fsx.MoveDurable(tmp, s.attPath(uid, a)); err != nil {
 		return err
 	}
 	return s.markReady(ctx, uid, a)
 }
 
 func (s *Store) markReady(ctx context.Context, uid string, a *Attachment) error {
-	head := make([]byte, 512)
-	f, err := os.Open(s.filePath(uid, a.ID))
-	if err != nil {
-		return err
-	}
-	n, _ := io.ReadFull(f, head)
-	f.Close()
-	a.Mime = detectMime(head[:n], a.Filename)
-	res, err := s.DB.W.ExecContext(ctx, `UPDATE attachments SET state='ready', mime=?, size_bytes=?, updated_at=? WHERE id=? AND user_id=? AND state='uploading'`,
-		a.Mime, a.SizeBytes, now(), a.ID, uid)
+	res, err := s.DB.W.ExecContext(ctx, `UPDATE attachments SET state='ready', size_bytes=?, updated_at=? WHERE id=? AND user_id=? AND state='uploading'`,
+		a.SizeBytes, now(), a.ID, uid)
 	if err != nil {
 		return err
 	}
@@ -401,12 +443,17 @@ func (s *Store) markReady(ctx context.Context, uid string, a *Attachment) error 
 			return nil
 		}
 		// purged/canceled meanwhile: don't leave the bytes behind
-		os.Remove(s.filePath(uid, a.ID))
+		os.Remove(s.attPath(uid, a))
 		return ErrNotFound
 	}
 	a.State = "ready"
 	a.Inline = InlineImageTypes[a.Mime]
-	go s.fillSHA(context.WithoutCancel(ctx), uid, a.ID)
+	s.writeMeta(ctx, uid, a.NoteID)
+	bg := context.WithoutCancel(ctx)
+	go func() {
+		s.fillSHA(bg, uid, a.ID)
+		s.runPendingRef(bg, uid, a.Ref) // notes that were waiting for this image get their copy
+	}()
 	return nil
 }
 
@@ -425,12 +472,22 @@ func detectMime(head []byte, filename string) string {
 }
 
 func (s *Store) fillSHA(ctx context.Context, uid, id string) {
-	sum, err := fsx.HashFile(s.filePath(uid, id))
+	a, err := s.getAtt(ctx, uid, id)
+	if err != nil || a.State != "ready" {
+		return
+	}
+	sum, err := fsx.HashFile(s.attPath(uid, a))
 	if err != nil {
 		s.Log.Warn("attachment hash", "id", id, "err", err)
 		return
 	}
 	s.DB.W.ExecContext(ctx, `UPDATE attachments SET sha256=? WHERE id=? AND user_id=?`, sum, id, uid)
+	if want := s.refSHA(ctx, uid, a.Ref); want == "" {
+		s.DB.W.ExecContext(ctx, `UPDATE ref_content SET sha256=? WHERE user_id=? AND ref=? AND sha256=''`, sum, uid, a.Ref)
+	} else if want != sum {
+		s.Log.Warn("image content differs from its other copies (run `notes doctor`)", "ref", a.Ref, "note", a.NoteID)
+	}
+	s.writeMeta(ctx, uid, a.NoteID)
 }
 
 func (s *Store) ListAttachments(ctx context.Context, uid, noteID string) ([]Attachment, error) {
@@ -456,66 +513,17 @@ func (s *Store) AttachmentFile(ctx context.Context, uid, id string) (*Attachment
 	if err != nil || a.State != "ready" {
 		return nil, "", ErrNotFound
 	}
-	return a, s.filePath(uid, id), nil
+	return a, s.attPath(uid, a), nil
 }
 
-// AttachmentByRef resolves an inline marker ref for the session user.
+// AttachmentByRef resolves an inline marker ref for the session user. Every copy
+// of a ref has the same content; the newest one is returned.
 func (s *Store) AttachmentByRef(ctx context.Context, uid, ref string) (*Attachment, error) {
-	a, err := scanAtt(s.DB.R.QueryRowContext(ctx, `SELECT `+attCols+` FROM attachments WHERE user_id=? AND ref=? AND state='ready'`, uid, ref))
+	a, err := scanAtt(s.DB.R.QueryRowContext(ctx, `SELECT `+attCols+` FROM attachments WHERE user_id=? AND ref=? AND state='ready' ORDER BY created_at DESC, id LIMIT 1`, uid, ref))
 	if err != nil {
 		return nil, notFoundIfNoRows(err)
 	}
 	return &a, nil
-}
-
-// copyAttachment gives noteID its own copy (new id + ref) of a ready attachment.
-func (s *Store) copyAttachment(ctx context.Context, uid, noteID string, a *Attachment) (*Attachment, error) {
-	src := s.filePath(uid, a.ID)
-	n := &Attachment{ID: NewID(), Ref: NewRef(), NoteID: noteID, Filename: a.Filename, Mime: a.Mime,
-		SizeBytes: a.SizeBytes, State: "ready", CreatedAt: now(), Inline: a.Inline}
-	dst := s.filePath(uid, n.ID)
-	if err := os.Link(src, dst); err != nil { // hard link: instant, no extra space
-		if err := copyFile(src, dst); err != nil {
-			return nil, err
-		}
-	}
-	for range 5 {
-		_, err := s.DB.W.ExecContext(ctx, `INSERT INTO attachments(`+attCols+`,user_id,updated_at,sha256)
-SELECT ?,?,?,?,?,?,?,?,?,?,sha256 FROM attachments WHERE id=?`,
-			n.ID, n.Ref, n.NoteID, n.Filename, n.Mime, n.SizeBytes, n.State, n.CreatedAt, uid, n.CreatedAt, a.ID)
-		if err == nil {
-			return n, nil
-		}
-		if !strings.Contains(err.Error(), "UNIQUE") {
-			os.Remove(dst)
-			return nil, err
-		}
-		n.Ref = NewRef()
-	}
-	os.Remove(dst)
-	return nil, ErrRefTaken
-}
-
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, fsx.FileMode)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		os.Remove(dst)
-		return err
-	}
-	if err := out.Sync(); err != nil {
-		out.Close()
-		return err
-	}
-	return out.Close()
 }
 
 func (s *Store) RenameAttachment(ctx context.Context, uid, id, name string) (*Attachment, error) {
@@ -527,14 +535,32 @@ func (s *Store) RenameAttachment(ctx context.Context, uid, id, name string) (*At
 	if n, _ := res.RowsAffected(); n == 0 {
 		return nil, ErrNotFound
 	}
-	return s.getAtt(ctx, uid, id)
+	a, err := s.getAtt(ctx, uid, id)
+	if err == nil {
+		s.writeMeta(ctx, uid, a.NoteID)
+	}
+	return a, err
 }
 
 func (s *Store) DeleteAttachment(ctx context.Context, uid, id string) error {
+	a, err := s.getAtt(ctx, uid, id)
+	if err != nil {
+		return err
+	}
+	if a.State == "ready" {
+		s.flushPendingFor(ctx, uid, []string{a.Ref}) // other notes waiting for this image copy it first
+	}
+	unlockNote := s.locks.Lock("note:" + a.NoteID)
+	defer unlockNote()
 	unlock := s.locks.Lock("att:" + id)
 	defer unlock()
-	if _, err := s.getAtt(ctx, uid, id); err != nil {
+	if a, err = s.getAtt(ctx, uid, id); err != nil {
 		return err
+	}
+	if a.State == "ready" {
+		if err := s.guardLastCopy(ctx, uid, a.NoteID, a.Ref); err != nil {
+			return Invalid("%s", err.Error())
+		}
 	}
 	if _, err := s.DB.W.ExecContext(ctx, `UPDATE attachments SET state='deleting', updated_at=? WHERE id=? AND user_id=?`, now(), id, uid); err != nil {
 		return err
@@ -544,13 +570,26 @@ func (s *Store) DeleteAttachment(ctx context.Context, uid, id string) error {
 
 // removeAttachment unlinks bytes and the row. Caller holds the attachment lock.
 func (s *Store) removeAttachment(ctx context.Context, uid, id string) error {
-	for _, p := range []string{s.tmpPath(uid, id), s.filePath(uid, id)} {
+	a, err := s.getAtt(ctx, uid, id)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	paths := []string{s.tmpPath(uid, id)}
+	if a.Ext != "" {
+		paths = append(paths, s.attPath(uid, a))
+	}
+	for _, p := range paths {
 		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 	}
-	_, err := s.DB.W.ExecContext(ctx, `DELETE FROM attachments WHERE id=? AND user_id=?`, id, uid)
-	return err
+	if _, err := s.DB.W.ExecContext(ctx, `DELETE FROM attachments WHERE id=? AND user_id=?`, id, uid); err != nil {
+		return err
+	}
+	s.writeMeta(ctx, uid, a.NoteID)
+	return nil
 }
 
 // finishDeletingAttachments removes every 'deleting' attachment (of one note, or all if noteID is "").

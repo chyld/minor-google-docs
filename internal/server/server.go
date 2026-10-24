@@ -22,6 +22,7 @@ type Server struct {
 	log       *slog.Logger
 	limiter   *auth.Limiter
 	dummyHash string
+	doctor    doctorJobs
 }
 
 func New(cfg *config.Config, store *core.Store, log *slog.Logger) (*Server, error) {
@@ -83,6 +84,8 @@ func (s *Server) Routes() http.Handler {
 	api("DELETE /api/attachments/{id}", s.handleDeleteAttachment)
 
 	api("GET /api/export", s.handleExport)
+	api("GET /api/me/doctor", s.handleDoctorStatus)
+	api("POST /api/me/doctor", s.handleDoctorStart)
 
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "not_found", "no such endpoint")

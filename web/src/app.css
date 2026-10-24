@@ -39,6 +39,7 @@
   --ink: #1c2430;
   --ink-2: #4a5260;
   --muted: #646a78;
+  --ok: oklch(0.5 0.13 150);
   --toast-accent: oklch(0.82 0.13 295);
   --mark: oklch(0.85 0.15 85 / 0.55);
   --mark-strong: oklch(0.75 0.18 60 / 0.6);
@@ -84,6 +85,7 @@
   --ink: #ece9f5;
   --ink-2: #bdb8cf;
   --muted: #9a95b0;
+  --ok: oklch(0.8 0.14 150);
   --toast-accent: oklch(0.48 0.2 295);
   --mark: oklch(0.55 0.13 85 / 0.55);
   --mark-strong: oklch(0.6 0.16 60 / 0.7);
@@ -2115,6 +2117,30 @@ input:focus {
 }
 .stat.warn .stat-value {
   color: var(--warn);
+}
+.check-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.check-result:not(:empty) {
+  margin-top: 10px;
+}
+.check-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.check-list li + li {
+  margin-top: 2px;
+}
+.ok-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ok);
 }
 .warn-text {
   color: var(--warn);

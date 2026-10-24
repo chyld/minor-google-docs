@@ -50,6 +50,14 @@ export const registry = {
     return p;
   },
 
+  /** Look a ref up again if its cached copy (attachment `staleId`) failed to load. */
+  refresh(ref: string, staleId: string) {
+    const s = states.get(ref);
+    if (s?.kind !== 'ready' || s.att.id !== staleId || inflight.has(ref)) return;
+    states.delete(ref);
+    void this.resolve(ref);
+  },
+
   /** Seed from a loaded note's attachment list. */
   seed(atts: Attachment[]) {
     for (const a of atts) if (states.get(a.ref)?.kind !== 'pending') emit(a.ref, { kind: 'ready', att: a });

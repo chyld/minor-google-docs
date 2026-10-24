@@ -40,14 +40,16 @@ func dsn(path string, immediate bool) string {
 	return "file:" + path + "?" + q.Encode()
 }
 
-func Open(dataDir string) (*DB, error) {
+// Open opens the databases and applies migrations up to maxVersion (0 = all).
+// The layout conversion opens at version 1 so it can back up the old schema first.
+func Open(dataDir string, maxVersion int) (*DB, error) {
 	path := filepath.Join(dataDir, "db", "notes.sqlite")
 	w, err := sql.Open("sqlite", dsn(path, true))
 	if err != nil {
 		return nil, err
 	}
 	w.SetMaxOpenConns(1)
-	if err := migrate(w); err != nil {
+	if err := migrate(w, maxVersion); err != nil {
 		w.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
@@ -83,7 +85,22 @@ func (d *DB) Close() {
 	d.W.Close()
 }
 
-func migrate(db *sql.DB) error {
+// Migrate applies the remaining migrations.
+func (d *DB) Migrate() error {
+	if err := migrate(d.W, 0); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	return nil
+}
+
+// Version is the schema version applied so far.
+func (d *DB) Version() (int, error) {
+	var v int
+	err := d.W.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_version`).Scan(&v)
+	return v, err
+}
+
+func migrate(db *sql.DB, maxVersion int) error {
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL)`); err != nil {
 		return err
 	}
@@ -98,7 +115,7 @@ func migrate(db *sql.DB) error {
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	for _, e := range entries {
 		v, err := strconv.Atoi(strings.SplitN(e.Name(), "_", 2)[0])
-		if err != nil || v <= cur {
+		if err != nil || v <= cur || (maxVersion > 0 && v > maxVersion) {
 			continue
 		}
 		body, _ := migrations.ReadFile("migrations/" + e.Name())

@@ -56,37 +56,102 @@ Go binary  `notes`
 
 ### 3.1 Layout
 
+One folder per note: everything that belongs to a note sits together, so a lost database can be
+rebuilt from the folders (§3.4) and a person can read the data folder directly.
+
 ```
 data/
+├── layout                      # "2" once the folder uses this layout (§3.3)
 ├── db/
 │   ├── notes.sqlite            # metadata (+ -wal, -shm)
-│   └── search.sqlite           # FTS index — delete anytime, `notes reindex` rebuilds
+│   ├── search.sqlite           # FTS index — delete anytime, `notes reindex` rebuilds
+│   └── layout.lock             # flock held while a process checks/converts the layout
 ├── tmp/
 │   └── <uid>/<upload-id>       # in-progress uploads, per user, GC after 24 h
-├── backups/                    # default target of `notes backup`
-├── lost+found/                 # where `doctor --fix` quarantines orphans
+│   └── <uid>/purge-<note-id>/  # a note folder being deleted forever (§7.6)
+├── backups/                    # default target of `notes backup`; pre-layout-v2-*.tar.gz (§3.3)
+├── lost+found/                 # where doctor, the conversion and `user rm` set things aside
 └── users/
     └── <user-uuid>/
-        ├── notes/
-        │   ├── <note-uuid>.txt       # body — UTF-8, LF line endings
-        │   └── <note-uuid>.txt.bak   # previous version (one generation)
-        └── files/
-            └── <attachment-uuid>     # raw bytes
+        ├── user.json                   # mirror of the account (never the password)
+        └── notes/
+            └── <note-uuid>/
+                ├── note.txt            # body — UTF-8, LF line endings
+                ├── note.txt.bak        # previous version (one generation)
+                ├── meta.json           # mirror of the note's database row (§3.4)
+                └── files/              # created on the first image
+                    └── <ref>.<ext>     # raw bytes, named after the marker's ref
 ```
 
-- IDs: UUIDv7. No path is ever built from user input.
+- IDs: UUIDv7. No path is ever built from user input: folder names are UUIDs, file names are a
+  validated ref plus an extension chosen from a fixed table by the sniffed content type
+  (`png jpg gif webp bmp ico pdf zip gz mp3 wav ogg mp4 webm txt`, anything else `bin`).
 - Permissions: dirs `0700`, files `0600`, owned by the container UID.
 - `tmp/` and `users/` are on the same filesystem (required for atomic rename; checked at startup).
 
 ### 3.2 What is authoritative
 
+The database is the source of truth for everything except the note text, which stays
+file-authoritative (the file is written first, and reconcile copies file → database), so a crash
+between the two writes can never lose the latest edit.
+
 | Data | Authority | If lost |
 |---|---|---|
-| Note body | `.txt` file | Gone (restore from backup) |
-| Attachment bytes | `files/<id>` | Gone |
-| Title, size, sha256 of a note | Derived from the `.txt` | Recomputed on startup reconcile |
-| Users, sessions, tags, tag colors, note↔tag, pinned, trash state, attachment filename/mime/ownership | **`notes.sqlite`** | **Not rebuildable** — back up the DB |
+| Note body | `note.txt` | Gone (restore from backup) |
+| Attachment bytes | `files/<ref>.<ext>` | Copied back from another note with the same image (doctor), else gone |
+| Title, size, sha256 of a note | Derived from `note.txt` | Recomputed on startup reconcile |
+| Tags, tag colors, note↔tag, pinned, trash state, dates, attachment filename/mime | **`notes.sqlite`**, mirrored in `meta.json` | `notes rebuild-db` (§3.4) |
+| Users (name, disabled) | **`notes.sqlite`**, mirrored in `user.json` | `notes rebuild-db`; passwords must be set again |
+| Passwords, sessions, audit log | `notes.sqlite` only | Back up the DB |
 | Search index | Derived | `notes reindex` |
+
+### 3.3 Converting an older data folder
+
+Data folders from before this layout (`notes/<id>.txt`, `files/<attachment-id>`) are converted
+once, automatically, by `notes serve` before it starts listening (or ahead of time with
+`notes migrate-layout`). The conversion:
+
+1. Takes `data/db/layout.lock` (an exclusive `flock`), so two processes never convert at once.
+2. Checks free space: the backup (size of `users/` + the database twice) + every image copy it will
+   make + `NOTES_MIN_FREE`. Not enough → exits with the numbers; nothing has changed.
+3. Writes **one** backup of the untouched folder and old schema, `backups/pre-layout-v2-<ts>.tar.gz`,
+   verifies it can be read, and records it in `backups/pre-layout-v2.done` (a resumed run doesn't make
+   another; it is never pruned).
+4. Applies migration 002 (§4.2).
+5. Moves each note's `.txt`/`.bak` into its folder, and each image into its note's `files/`: the
+   extension is sniffed and stored on the row *before* the rename, so a crash in between resumes.
+   Renames never overwrite: if both copies exist and differ, the old one goes to `lost+found/`.
+6. Gives every note that shows another note's image its own copy (§6.3).
+7. Writes every `meta.json` and `user.json`.
+8. Only then moves what is left in the old places (files with no row) to `lost+found/layout-v2-<ts>/`.
+9. Marks the layout done (`settings.layout_version`, `data/layout`).
+
+Every step can be repeated, so a crash or `SIGTERM` part-way is finished by the next start. Until the
+folder is converted, other commands refuse to run (they would misread it), except `backup` and
+`user passwd|list|disable|enable`, which only touch the database or copy files verbatim. Restoring an
+old backup later is converted again on the next start. Going back to an older version of the app
+means restoring the pre-layout backup.
+
+### 3.4 Mirrors and `notes rebuild-db`
+
+`meta.json` is rewritten right after every change to its note (create, save, pin, trash, tags, image
+added/renamed/removed/copied, hash computed). Tag renames, recolours and deletes touch many notes:
+those notes are queued in `meta_dirty` in the same transaction and rewritten in the background, by
+the hourly janitor and at startup. The JSON is canonical (fixed field order, tags sorted by name,
+images by creation time, integer-millisecond times), so different bytes always mean "out of date".
+
+```json
+{"version":1,"id":"…","created_at":1792878064254,"updated_at":1792878064254,"pinned":true,"trashed_at":null,
+ "tags":[{"name":"work","color":"teal"}],
+ "attachments":[{"ref":"hespb6kga2","ext":"png","filename":"screenshot.png","mime":"image/png",
+                 "size_bytes":123,"sha256":"…","created_at":1792878064264}]}
+```
+
+`notes rebuild-db` refills a new, empty database from the folders: users (with their `disabled`
+flag and a password that never verifies — set one with `notes user passwd`), tags by name, notes
+(pinned, trash, dates), images, then the search index. Nothing read from the files is used as a
+path: user and note ids must equal their folder names, refs and extensions are validated, file
+paths are rebuilt from them, and stored types are re-sniffed.
 
 ## 4. Database schema
 
@@ -144,20 +209,33 @@ CREATE TABLE note_tags(
   FOREIGN KEY(tag_id, user_id)  REFERENCES tags(id, user_id)  ON DELETE CASCADE);
 CREATE INDEX note_tags_tag ON note_tags(tag_id);
 
-CREATE TABLE attachments(
-  id TEXT PRIMARY KEY,                      -- client-generated UUIDv7, validated
-  ref TEXT NOT NULL,                        -- 10-char base32 marker id (§6)
+CREATE TABLE attachments(                  -- as of migration 002 (§3.3)
+  id TEXT PRIMARY KEY,                      -- client-generated UUIDv7, validated (copies: server UUIDv7)
+  ref TEXT NOT NULL,                        -- 10-char base32 marker id (§6); same in every copy
   user_id TEXT NOT NULL,
   note_id TEXT NOT NULL,
   filename TEXT NOT NULL,                   -- original name, display only
   mime TEXT NOT NULL,                       -- server-sniffed
+  ext TEXT NOT NULL DEFAULT '',             -- disk extension, stored before the file moves ('' = not yet)
   size_bytes INTEGER NOT NULL,
-  sha256 TEXT,                              -- integrity, computed on finalize
+  sha256 TEXT,                              -- integrity, computed after finalize
   state TEXT NOT NULL,                      -- 'uploading' | 'ready' | 'deleting'
   created_at INTEGER NOT NULL,
-  UNIQUE(user_id, ref),
+  UNIQUE(note_id, ref),                     -- an image at most once per note
   FOREIGN KEY(note_id, user_id) REFERENCES notes(id, user_id) ON DELETE CASCADE);
 CREATE INDEX attachments_note ON attachments(note_id);
+CREATE INDEX attachments_ref ON attachments(user_id, ref);
+
+CREATE TABLE ref_content(                   -- one ref = one image's content per user (§6.1)
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  ref TEXT NOT NULL, sha256 TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY(user_id, ref));
+CREATE TABLE pending_copies(                -- markers waiting for their copy (§6.3)
+  note_id TEXT NOT NULL, user_id TEXT NOT NULL, ref TEXT NOT NULL, created_at INTEGER NOT NULL,
+  PRIMARY KEY(note_id, ref),
+  FOREIGN KEY(note_id, user_id) REFERENCES notes(id, user_id) ON DELETE CASCADE);
+CREATE TABLE meta_dirty(note_id TEXT PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE);  -- §3.4
+CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);                          -- layout_version
 
 CREATE TABLE audit_log(
   id INTEGER PRIMARY KEY, at INTEGER NOT NULL, actor TEXT NOT NULL,  -- 'cli' | user id
@@ -199,9 +277,11 @@ CREATE TABLE indexed(note_id TEXT PRIMARY KEY, content_sha256 TEXT NOT NULL);
 
 ### 5.2 Crash recovery (startup reconcile, also `notes doctor`)
 
-For each note row: if file hash ≠ `content_sha256` → **file wins**, recompute derived fields.
-For each `indexed` row: if sha ≠ note's sha → re-index. Remove stray `*.tmp` files.
-Runs at startup, takes seconds at homelab scale.
+For each note row: if file hash ≠ `content_sha256` → **file wins**, recompute derived fields (and
+`meta.json`). For each `indexed` row: if sha ≠ note's sha → re-index. Remove stray `*.tmp` files
+older than 10 minutes. A trashed note whose folder is gone is an interrupted purge: finish it, and
+delete leftover `tmp/<uid>/purge-<id>` folders. Then rewrite queued `meta.json` files and retry
+waiting image copies (§6.3). Runs at startup, takes seconds at homelab scale.
 
 ### 5.3 Client
 
@@ -234,10 +314,12 @@ Server rack wiring today:
 Need to relabel port 12.
 ```
 
-- `ref` = 10 chars of random base32 (50 bits), unique per user (DB constraint). Generated
-  client-side together with the attachment UUID; server rejects collisions (client retries).
+- `ref` = 10 chars of random base32 (50 bits). Generated client-side together with the attachment
+  UUID. **One ref is one image's content per user**: a new upload claims its ref in `ref_content`
+  in the same transaction as its row, so a ref used before (even by a deleted image) is refused and
+  the client retries with a new one. Copies of an image in other notes keep the ref (§6.3).
 - The caption after `]` is cosmetic; resolution is **by `ref` only**, scoped to the session user
-  (copying a marker into another of your notes works).
+  (copying a marker into another of your notes works, §6.3).
 - Anything not matching exactly (e.g. leading spaces) is ordinary text. No escaping needed.
 - Only `[image:…]` markers exist. Non-image files live in the attachment panel only.
 
@@ -250,6 +332,31 @@ Need to relabel port 12.
 - Paste/drop image flow: client generates `id` + `ref` → inserts marker immediately with an
   inline progress placeholder → uploads → placeholder becomes the image. Typing never blocks.
 - Removing a marker doesn't delete the attachment; the panel flags it as "not shown in note".
+- If a shown image fails to load (its copy was deleted meanwhile), the widget looks the ref up once
+  more before showing it as broken.
+
+### 6.3 An image used in several notes
+
+Pasting a marker into another note gives that note its own **real copy** of the image, in its own
+folder, with the same ref, so the text never changes and deleting either note never breaks the other.
+
+- **When:** a save (or a note created with text) records the markers it *adds*, compared with the
+  previous text, that the note has no image for, in `pending_copies`, before the file is written.
+  After the save the server copies them (outside the note lock) and the response carries the note's
+  new attachment list, so the editor and the attachment count update at once. Only added markers
+  are queued, so deleting a copy from the attachments panel stays deleted.
+- **How:** both notes are locked in id order; the bytes go to a temp file in the target's `files/`,
+  the size and the hash (against `ref_content`) are checked, then a durable rename and the row.
+  Disk space is leased like an upload's.
+- **Not possible yet** (source still uploading, disk full): the request stays in `pending_copies`
+  and is retried when that upload finishes, by the hourly janitor, at startup, and by doctor. The
+  image still shows meanwhile (refs resolve user-wide).
+- **Never lost:** deleting forever (or deleting from the panel) the last copy of an image that another
+  note still waits for first finishes that copy; if it can't, it is refused with `409 copy_pending`
+  ("an image in this note is still being copied to another note"). Empty trash and the janitor skip
+  such notes until the copy is done.
+- `POST /api/notes/{id}/duplicate` copies the text the same way, so the duplicate has its own images.
+- `GET /api/refs/{ref}` returns the newest ready copy (all copies have the same content).
 
 ## 7. Uploads & attachments
 
@@ -269,10 +376,13 @@ Client chunk size 8 MiB (fits behind Cloudflare tunnels / default proxies).
 
 ### 7.3 Finalize (on last byte, before responding)
 
-fsync temp file → sniff mime from magic bytes → rename into `users/<uid>/files/<id>` →
-fsync dir → `UPDATE … SET state='ready', mime WHERE state='uploading'`.
+fsync temp file → sniff mime and the disk extension from magic bytes → store both on the
+still-`uploading` row → rename into the note's `files/<ref>.<ext>` (never recreating a note folder
+that was purged meanwhile) → fsync dir → `UPDATE … SET state='ready' WHERE state='uploading'`.
 The client sees success only after the row is `ready`. Idempotent if retried: if the rename
-landed but the row update didn't, `HEAD` (or an empty `PATCH` at the full offset) completes it.
+landed but the row update didn't, `HEAD` (or an empty `PATCH` at the full offset) finds the file
+from the stored extension and completes it. Finishing an upload also runs any copies waiting
+for that image (§6.3).
 **sha256 is computed asynchronously** after `ready` (and backfilled by the janitor), so a
 multi-GB upload doesn't stall the final response behind a full re-read of the file; it is an
 integrity record, not part of the upload handshake.
@@ -297,8 +407,10 @@ disables). Free space and per-user usage shown in the UI and `/healthz`-adjacent
 ### 7.6 Lifecycle
 
 - Delete one attachment: `state='deleting'` → unlink file → delete row (idempotent; janitor retries).
-- Trash note: attachments stay with the note; restore brings them back.
-- Purge note: in one tx mark note + attachments deleting → unlink files → delete rows.
+- Trash note: the folder stays; restore brings everything back.
+- Purge note: finish copies other notes wait for (§6.3) → mark attachments `deleting` (a late upload
+  can't land) → rename the note folder to `tmp/<uid>/purge-<id>` in one step → delete the rows →
+  remove that folder. A crash after the rename is finished by reconcile.
 - Uploads in `state='uploading'` older than 24 h: janitor deletes temp file + row.
 
 ## 8. Users, auth & security
@@ -360,11 +472,13 @@ secure when the request arrived over TLS or via trusted proxy with `proto=https`
 |---|---|
 | `notes serve` | Server + janitor (default command) |
 | `notes backup [dest]` | `VACUUM INTO` the DB, then tar `users/` → `notes-<ts>.tar.gz` (skips `tmp/`, `*.tmp`, `search.sqlite`). Safe while running. Keeps last N (`NOTES_BACKUP_KEEP`). |
-| `notes export <user> [dest]` | Zip: `notes/<title>.txt`, `attachments/<original name>`, `manifest.json` (tags, pins, dates, refs) |
-| `notes import <user> <dir>` | Create notes from a folder of `.txt` files |
-| `notes reindex` | Rebuild `search.sqlite` from `.txt` files |
-| `notes doctor [--fix]` | Report DB↔disk mismatches, orphans, stray tmp, old user dirs. `--fix` is explicit; orphans move to `lost+found/`, never deleted. |
-| `notes gc` | Run janitor once (trash purge, upload GC, session sweep) |
+| `notes export <user> [dest]` | Zip with one folder per note (§9.3) |
+| `notes import <user> <zip\|dir>` | Restore an export (old or new zip layout, read through `manifest.json`), or create notes from `.txt` files |
+| `notes reindex` | Rebuild `search.sqlite` from the note files |
+| `notes doctor [--fix]` | Every user's check (§9.2) plus folders of deleted users, stray uploads and disk space. `--fix` is explicit; nothing is deleted. |
+| `notes gc` | Run janitor once (trash purge, upload GC, session sweep, meta.json queue, waiting copies) |
+| `notes migrate-layout` | Convert an older data folder now (§3.3); `serve` also does it on start |
+| `notes rebuild-db` | Refill a new, empty database from the note folders (§3.4) |
 | `notes healthcheck` | Exit 0 if `/healthz` OK (for Docker) |
 
 - **Janitor** (in `serve`, hourly): purge notes trashed > `NOTES_TRASH_DAYS` (default 30, `0` = never),
@@ -372,7 +486,41 @@ secure when the request arrived over TLS or via trusted proxy with `proto=https`
 - `/healthz`: no version/user info. Checks that the server can answer (`SELECT 1` on the
   metadata DB, no write lock) and that `data/tmp` is writable (a tiny temp file is created and
   removed) — a read-only or full volume makes it 503, which is the point: the app can't save.
-- Restore: stop, put `data/` back (or untar backup), delete `search.sqlite`, start (reindexes).
+- Restore: stop, put `data/` back (or untar backup), delete `search.sqlite`, start (reindexes; an
+  old-layout backup is converted, §3.3). Lost only the database: start once (it sees an empty
+  database over converted folders), stop, run `notes rebuild-db`, set passwords, start.
+
+### 9.2 Check my notes (per-user doctor)
+
+**Account & data → Check my notes** (also in the command palette) runs a check of the signed-in
+user's notes only, on the server in the background (`POST /api/me/doctor {fix}` starts it, one at
+a time per user; `GET /api/me/doctor` polls; it isn't tied to the request, so a large account
+can't hit the request deadline). It lists problems in plain words, naming notes by title and
+never showing server paths; **Repair** runs it again with `fix`. It checks:
+
+- a note without its text: restored from `.bak`, else recreated empty — never for a trashed note
+  (that is an interrupted purge, finished automatically);
+- an image whose file is missing: copied back from another note with the same image, else reported;
+- an image a note shows but doesn't have: copied in (§6.3), or reported as "no longer exists";
+- copies still waiting; one ref with different content in different notes;
+- `meta.json` / `user.json` missing or out of date: rewritten;
+- files and folders the database doesn't know (including old-layout leftovers): moved to
+  `lost+found/doctor-<ts>/` if older than 10 minutes.
+
+Repairs never delete anything, and never remove database rows. The CLI `notes doctor` runs the same
+check for every user (with paths and ids in its messages) plus the checks that span users.
+
+### 9.3 Export
+
+**Export my notes** (account menu, command palette, and Account & data) downloads
+`GET /api/export`, also `notes export`: a zip with one folder per note, `notes/<title>/` (trashed
+notes under `trash/`), each holding `note.txt`, `meta.json` and `files/` with every image under
+its original name. Folder names are made unique once per note (`Untitled`, `Untitled (2)`) and
+file names once per folder, comparing case-insensitively. `manifest.json` (version 2) lists every
+note's folder, file, tags with their colours, pins, dates and images (ref, name, file), and is what
+import reads, so old and new zips both import. Importing keeps an image's ref when it is free, or
+when the same ref already holds the same content (a copy); otherwise it picks a new ref and
+rewrites the marker.
 
 ### Config (env)
 
@@ -388,14 +536,15 @@ Lists use keyset pagination: `?limit=50&cursor=<opaque>` → `{items, next_curso
 ```
 POST   /api/login                POST /api/logout          POST /api/logout-others
 GET    /api/me                   PUT  /api/me/password     GET  /api/me/storage
+GET    /api/me/doctor            POST /api/me/doctor {fix}  (§9.2)
 GET    /api/notes?q=&tag=&untagged=&pinned=&trash=&has_attachments=&sort=&limit=&cursor=
          (q present → FTS results with escaped highlight snippets)
 POST   /api/notes                          → {id, sha256}  (empty body)
 GET    /api/notes/{id}                     → meta + body + sha256 + tags + attachments
-PUT    /api/notes/{id}/body                {body, base_sha256} → 200 | 409
+PUT    /api/notes/{id}/body                {body, base_sha256} → 200 (+attachments when images were copied, §6.3) | 409
 PATCH  /api/notes/{id}                     {pinned?, tag_ids?, trashed?}
-POST   /api/notes/{id}/duplicate           (copies body; markers still resolve — same user)
-DELETE /api/notes/{id}                     permanent; only when trashed
+POST   /api/notes/{id}/duplicate           (copies body and gives the copy its own images, §6.3)
+DELETE /api/notes/{id}                     permanent; only when trashed (409 copy_pending, §6.3)
 POST   /api/trash/empty
 GET    /api/tags                           → with counts
 POST   /api/tags   PATCH /api/tags/{id}   DELETE /api/tags/{id}

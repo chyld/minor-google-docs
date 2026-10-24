@@ -1,6 +1,6 @@
 <script lang="ts">
   import { app } from '../lib/state.svelte';
-  import { api } from '../lib/api';
+  import { api, downloadExport } from '../lib/api';
   import { hue } from '../lib/colors';
   import type { NoteMeta } from '../lib/types';
   import { composing, dialog } from '../lib/a11y';
@@ -39,6 +39,8 @@
         ] as Item[])
       : []),
     { kind: 'action', id: 'account', label: 'Account & data', icon: 'user', run: () => (app.accountOpen = true) },
+    { kind: 'action', id: 'export', label: 'Export my notes', icon: 'download', run: downloadExport },
+    { kind: 'action', id: 'doctor', label: 'Check my notes', icon: 'check', run: () => ((app.checkOnOpen = true), (app.accountOpen = true)) },
     { kind: 'action', id: 'keys', label: 'Keyboard shortcuts', icon: 'keyboard', hint: '?', run: () => (app.shortcutsOpen = true) },
     {
       kind: 'action',

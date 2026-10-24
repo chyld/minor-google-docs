@@ -1,6 +1,6 @@
 <script lang="ts">
   import { app, type View } from '../lib/state.svelte';
-  import { api } from '../lib/api';
+  import { api, downloadExport } from '../lib/api';
   import { hue, PALETTE } from '../lib/colors';
   import type { Tag } from '../lib/types';
   import { menu } from '../lib/a11y';
@@ -164,6 +164,7 @@
         <button class="menu-scrim" aria-label="Close menu" tabindex="-1" onclick={() => (userMenu = false)}></button>
         <div class="menu menu-up" role="menu" aria-label="Account" use:menu={{ onclose: () => (userMenu = false) }}>
           <button role="menuitem" onclick={() => ((userMenu = false), (app.accountOpen = true))}><Icon name="user" size={16} /> Account & data</button>
+          <button role="menuitem" onclick={() => ((userMenu = false), downloadExport())}><Icon name="download" size={16} /> Export my notes</button>
           <button role="menuitem" onclick={() => ((userMenu = false), (app.shortcutsOpen = true))}><Icon name="keyboard" size={16} /> Keyboard shortcuts</button>
           <hr />
           <button role="menuitem" onclick={logout}><Icon name="logout" size={16} /> Log out</button>

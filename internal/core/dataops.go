@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -25,6 +26,11 @@ import (
 // (VACUUM INTO, taken first) plus users/. Safe while the server runs; files
 // newer than the snapshot are harmless, and reconcile fixes derived fields on restore.
 func (s *Store) Backup(ctx context.Context, destDir string) (string, error) {
+	return s.backup(ctx, destDir, "notes-", true)
+}
+
+// backup writes <prefix><ts>.tar.gz; only "notes-" archives are pruned.
+func (s *Store) backup(ctx context.Context, destDir, prefix string, prune bool) (string, error) {
 	if destDir == "" {
 		destDir = filepath.Join(s.Dir, "backups")
 	}
@@ -38,7 +44,7 @@ func (s *Store) Backup(ctx context.Context, destDir string) (string, error) {
 	}
 	defer os.Remove(snap)
 
-	out := filepath.Join(destDir, "notes-"+ts+".tar.gz")
+	out := filepath.Join(destDir, prefix+ts+".tar.gz")
 	f, err := os.OpenFile(out+".partial", os.O_WRONLY|os.O_CREATE|os.O_EXCL, fsx.FileMode)
 	if err != nil {
 		return "", err
@@ -85,7 +91,9 @@ func (s *Store) Backup(ctx context.Context, destDir string) (string, error) {
 	if err := fsx.MoveDurable(out+".partial", out); err != nil {
 		return "", err
 	}
-	s.pruneBackups(destDir)
+	if prune {
+		s.pruneBackups(destDir)
+	}
 	return out, nil
 }
 
@@ -128,15 +136,17 @@ func (s *Store) pruneBackups(dir string) {
 // ---- export ----
 
 type manifestNote struct {
-	ID          string           `json:"id"`
-	File        string           `json:"file"`
-	Title       string           `json:"title"`
-	Tags        []string         `json:"tags"`
-	Pinned      bool             `json:"pinned"`
-	Trashed     bool             `json:"trashed"`
-	CreatedAt   string           `json:"created_at"`
-	UpdatedAt   string           `json:"updated_at"`
-	Attachments []manifestAttach `json:"attachments"`
+	ID          string            `json:"id"`
+	File        string            `json:"file"`
+	Folder      string            `json:"folder,omitempty"`
+	Title       string            `json:"title"`
+	Tags        []string          `json:"tags"`
+	TagColors   map[string]string `json:"tag_colors,omitempty"`
+	Pinned      bool              `json:"pinned"`
+	Trashed     bool              `json:"trashed"`
+	CreatedAt   string            `json:"created_at"`
+	UpdatedAt   string            `json:"updated_at"`
+	Attachments []manifestAttach  `json:"attachments"`
 }
 
 type manifestAttach struct {
@@ -147,15 +157,17 @@ type manifestAttach struct {
 	Size     int64  `json:"size_bytes"`
 }
 
-// Export streams a zip of every note, attachment and a manifest for one user.
+// Export streams a zip of one user's notes: one folder per note
+// (notes/<title>/ or trash/<title>/) holding note.txt, meta.json and files/ with
+// each image under its original name, plus manifest.json, which import reads.
 func (s *Store) Export(ctx context.Context, uid string, w io.Writer) error {
 	tags, err := s.ListTags(ctx, uid)
 	if err != nil {
 		return err
 	}
-	tagName := map[string]string{}
+	tagByID := map[string]Tag{}
 	for _, t := range tags {
-		tagName[t.ID] = t.Name
+		tagByID[t.ID] = t
 	}
 	var metas []NoteMeta
 	for _, trash := range []bool{false, true} {
@@ -173,56 +185,76 @@ func (s *Store) Export(ctx context.Context, uid string, w io.Writer) error {
 		}
 	}
 	zw := zip.NewWriter(w)
-	used := map[string]bool{}
-	unique := func(p string) string {
-		ext := filepath.Ext(p)
-		base := strings.TrimSuffix(p, ext)
+	// names are compared case-insensitively: the zip may be unpacked on macOS/Windows
+	usedDirs := map[string]bool{}
+	uniqueDir := func(p string) string {
 		cand := p
-		for i := 2; used[strings.ToLower(cand)]; i++ {
-			cand = fmt.Sprintf("%s (%d)%s", base, i, ext)
+		for i := 2; usedDirs[strings.ToLower(cand)]; i++ {
+			cand = fmt.Sprintf("%s (%d)", p, i)
 		}
-		used[strings.ToLower(cand)] = true
+		usedDirs[strings.ToLower(cand)] = true
 		return cand
 	}
 	var manifest []manifestNote
 	for _, m := range metas {
-		folder := "notes"
+		root := "notes"
 		if m.TrashedAt != nil {
-			folder = "trash"
+			root = "trash"
 		}
-		name := unique(folder + "/" + safeName(m.Title) + ".txt")
 		b, err := os.ReadFile(s.notePath(uid, m.ID))
 		if errors.Is(err, fs.ErrNotExist) {
 			continue // purged while we were exporting
 		} else if err != nil {
 			return err
 		}
-		body := string(b)
+		folder := uniqueDir(root + "/" + safeName(m.Title))
+		name := folder + "/note.txt"
 		fw, err := zw.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Deflate, Modified: time.UnixMilli(m.UpdatedAt)})
 		if err != nil {
 			return err
 		}
-		if _, err := io.WriteString(fw, body); err != nil {
+		if _, err := fw.Write(b); err != nil {
 			return err
 		}
-		mn := manifestNote{ID: m.ID, File: name, Title: m.Title, Pinned: m.Pinned, Trashed: m.TrashedAt != nil,
-			CreatedAt: time.UnixMilli(m.CreatedAt).UTC().Format(time.RFC3339), UpdatedAt: time.UnixMilli(m.UpdatedAt).UTC().Format(time.RFC3339),
-			Tags: []string{}, Attachments: []manifestAttach{}}
-		for _, t := range m.TagIDs {
-			mn.Tags = append(mn.Tags, tagName[t])
+		if mb, err := s.buildMeta(ctx, uid, m.ID); err == nil {
+			fw, err := zw.CreateHeader(&zip.FileHeader{Name: folder + "/meta.json", Method: zip.Deflate, Modified: time.UnixMilli(m.UpdatedAt)})
+			if err != nil {
+				return err
+			}
+			if _, err := fw.Write(mb); err != nil {
+				return err
+			}
+		}
+		mn := manifestNote{ID: m.ID, File: name, Folder: folder, Title: m.Title, Pinned: m.Pinned, Trashed: m.TrashedAt != nil,
+			CreatedAt: time.UnixMilli(m.CreatedAt).UTC().Format(time.RFC3339Nano), UpdatedAt: time.UnixMilli(m.UpdatedAt).UTC().Format(time.RFC3339Nano),
+			Tags: []string{}, TagColors: map[string]string{}, Attachments: []manifestAttach{}}
+		for _, id := range m.TagIDs {
+			if t, ok := tagByID[id]; ok {
+				mn.Tags = append(mn.Tags, t.Name)
+				mn.TagColors[t.Name] = t.Color
+			}
 		}
 		atts, err := s.ListAttachments(ctx, uid, m.ID)
 		if err != nil {
 			return err
 		}
+		usedFiles := map[string]bool{}
 		for _, a := range atts {
-			f, err := os.Open(s.filePath(uid, a.ID))
+			f, err := os.Open(s.attPath(uid, &a))
 			if errors.Is(err, fs.ErrNotExist) {
 				continue // deleted while we were exporting
 			} else if err != nil {
 				return err
 			}
-			ap := unique("attachments/" + safeName(m.Title) + "/" + a.Filename)
+			fname := SanitizeFilename(a.Filename)
+			ext := filepath.Ext(fname)
+			base := strings.TrimSuffix(fname, ext)
+			cand := fname
+			for i := 2; usedFiles[strings.ToLower(cand)]; i++ {
+				cand = fmt.Sprintf("%s (%d)%s", base, i, ext)
+			}
+			usedFiles[strings.ToLower(cand)] = true
+			ap := folder + "/files/" + cand
 			fw, err := zw.CreateHeader(&zip.FileHeader{Name: ap, Method: zip.Store, Modified: time.UnixMilli(a.CreatedAt)})
 			if err != nil {
 				f.Close()
@@ -243,7 +275,7 @@ func (s *Store) Export(ctx context.Context, uid string, w io.Writer) error {
 	}
 	enc := json.NewEncoder(fw)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(map[string]any{"exported_at": time.Now().UTC().Format(time.RFC3339), "notes": manifest}); err != nil {
+	if err := enc.Encode(map[string]any{"version": 2, "exported_at": time.Now().UTC().Format(time.RFC3339), "notes": manifest}); err != nil {
 		return err
 	}
 	return zw.Close()
@@ -360,7 +392,11 @@ func (s *Store) importExport(ctx context.Context, uid string, fsys fs.FS, manife
 		}
 		var tagIDs []string
 		for _, name := range mn.Tags {
-			if t, err := s.CreateTag(ctx, uid, name, ""); err == nil {
+			color := mn.TagColors[name]
+			if !validColor(color) {
+				color = ""
+			}
+			if t, err := s.CreateTag(ctx, uid, name, color); err == nil {
 				tagIDs = append(tagIDs, t.ID)
 			}
 		}
@@ -373,23 +409,24 @@ func (s *Store) importExport(ctx context.Context, uid string, fsys fs.FS, manife
 		if !created.IsZero() && !updated.IsZero() {
 			s.DB.W.ExecContext(ctx, `UPDATE notes SET created_at=?, updated_at=? WHERE id=? AND user_id=?`,
 				created.UnixMilli(), updated.UnixMilli(), m.ID, uid)
+			s.writeMeta(ctx, uid, m.ID)
 		}
 		n++
 	}
 	return n, nil
 }
 
-// importAttachment stores r as a ready attachment of noteID, keeping wantRef if it is free.
+// importAttachment stores r as a ready attachment of noteID. It keeps wantRef
+// when the ref is free, or when it already names this same content (a copy of
+// an image shared between notes); otherwise it picks a new ref.
 func (s *Store) importAttachment(ctx context.Context, uid, noteID string, r io.Reader, filename, wantRef string) (*Attachment, error) {
 	l, err := s.reserve(-1)
 	if err != nil {
 		return nil, err
 	}
 	defer l.release()
-	a := &Attachment{ID: NewID(), Ref: wantRef, NoteID: noteID, Filename: SanitizeFilename(filename), State: "uploading", CreatedAt: now()}
-	if !ValidRef(a.Ref) || s.exists(ctx, `SELECT 1 FROM attachments WHERE user_id=? AND ref=?`, uid, a.Ref) {
-		a.Ref = NewRef()
-	}
+	a := &Attachment{ID: NewID(), Ref: wantRef, NoteID: noteID, Filename: SanitizeFilename(filename),
+		Mime: "application/octet-stream", State: "uploading", CreatedAt: now()}
 	if err := s.ensureUserDirs(uid); err != nil {
 		return nil, err
 	}
@@ -398,7 +435,8 @@ func (s *Store) importAttachment(ctx context.Context, uid, noteID string, r io.R
 	if err != nil {
 		return nil, err
 	}
-	size, err := io.Copy(&guardedWriter{f: f, l: l}, r)
+	h := sha256.New()
+	size, err := io.Copy(io.MultiWriter(&guardedWriter{f: f, l: l}, h), r)
 	if err == nil {
 		err = f.Sync()
 	}
@@ -408,10 +446,41 @@ func (s *Store) importAttachment(ctx context.Context, uid, noteID string, r io.R
 		return nil, err
 	}
 	a.SizeBytes = size
-	if _, err := s.DB.W.ExecContext(ctx, `INSERT INTO attachments(`+attCols+`,user_id,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		a.ID, a.Ref, a.NoteID, a.Filename, "application/octet-stream", a.SizeBytes, a.State, a.CreatedAt, uid, a.CreatedAt); err != nil {
+	sum := hex.EncodeToString(h.Sum(nil))
+	inserted := false
+	if ValidRef(a.Ref) {
+		if err := s.insertNewRef(ctx, uid, a, sum); err == nil {
+			inserted = true
+		} else if !errors.Is(err, ErrRefTaken) {
+			os.Remove(tmp)
+			return nil, err
+		} else if s.refSHA(ctx, uid, a.Ref) == sum {
+			// same image already known under this ref: another copy of it
+			tx, err := s.DB.W.BeginTx(ctx, nil)
+			if err != nil {
+				os.Remove(tmp)
+				return nil, err
+			}
+			err = insertAtt(tx, uid, a, sum)
+			if err == nil {
+				err = tx.Commit()
+			}
+			tx.Rollback()
+			inserted = err == nil
+		}
+	}
+	for i := 0; !inserted && i < 5; i++ {
+		a.Ref = NewRef()
+		if err := s.insertNewRef(ctx, uid, a, sum); err == nil {
+			inserted = true
+		} else if !errors.Is(err, ErrRefTaken) {
+			os.Remove(tmp)
+			return nil, err
+		}
+	}
+	if !inserted {
 		os.Remove(tmp)
-		return nil, err
+		return nil, ErrRefTaken
 	}
 	unlock := s.locks.Lock("att:" + a.ID)
 	defer unlock()

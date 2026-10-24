@@ -46,6 +46,7 @@ class ImageWidget extends WidgetType {
     // Pending uploads update progress in place instead of rebuilding the DOM on every tick.
     let ring: HTMLElement | null = null;
     let pendingURL = '';
+    let retried = false;
     const render = (s: RefState) => {
       if (s.kind === 'pending' && ring && s.url === pendingURL) {
         ring.style.setProperty('--p', String(Math.round(s.progress * 100)));
@@ -87,6 +88,12 @@ class ImageWidget extends WidgetType {
         } else {
           img.src = attachmentURL(s.att.id);
           img.onerror = () => {
+            // the copy we knew may be gone (its note was deleted): look the image up once more
+            if (!retried) {
+              retried = true;
+              registry.refresh(this.ref, s.att.id);
+              return;
+            }
             fig.dataset.state = 'broken';
           };
           frame.title = 'Click to select · click again to open';

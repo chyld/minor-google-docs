@@ -25,10 +25,7 @@ func TestConcurrentRecoveryKeepsFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	os.WriteFile(s.tmpPath(u.ID, id), []byte("abc"), 0o600)
-	// crash after the rename, before the row was marked ready
-	if err := fsx.MoveDurable(s.tmpPath(u.ID, id), s.filePath(u.ID, id)); err != nil {
-		t.Fatal(err)
-	}
+	crashAfterMove(t, s, u.ID, id) // crash after the rename, before the row was marked ready
 	var wg sync.WaitGroup
 	errs := make(chan error, 8)
 	for range 8 {
@@ -49,10 +46,10 @@ func TestConcurrentRecoveryKeepsFile(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := os.Stat(s.filePath(u.ID, id)); err != nil {
+	a, _ := s.getAtt(ctx, u.ID, id)
+	if _, err := os.Stat(s.attPath(u.ID, a)); err != nil {
 		t.Fatalf("finished upload lost its file: %v", err)
 	}
-	a, _ := s.getAtt(ctx, u.ID, id)
 	if a.State != "ready" {
 		t.Fatalf("state %s", a.State)
 	}

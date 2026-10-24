@@ -24,8 +24,10 @@ Open **http://<server-ip>:4444** and sign in.
 data/
 ├── db/notes.sqlite        metadata: users, tags, pins, trash state, attachment names
 ├── db/search.sqlite       search index — safe to delete, rebuilt automatically
-├── users/<id>/notes/*.txt your notes (plain UTF-8 text) + one .bak of the previous version
-├── users/<id>/files/*     attachments and screenshots (raw bytes)
+├── users/<id>/notes/<note>/   one folder per note:
+│     note.txt               the note (plain UTF-8 text) + note.txt.bak, the previous version
+│     meta.json              its tags, pin, trash state, dates and image names
+│     files/<ref>.png        its images and attachments, named after the marker in the text
 ├── backups/               output of `notes backup`
 └── lost+found/            anything `notes doctor --fix` or `user rm` set aside
 ```
@@ -38,8 +40,16 @@ Server rack wiring today:
 Need to relabel port 12.
 ```
 
-**Back up both the files and the database.** Tags, pins and original file names exist only in
-`notes.sqlite`. The `.txt` files alone don't keep them.
+Each note's folder holds everything about it. An image pasted into a second note gets its own
+copy in that note's folder, so deleting one note never breaks another.
+
+**Back up both the files and the database** (`notes backup` does both). The note folders mirror
+tags, pins and file names in `meta.json`, so if only the database is lost, `notes rebuild-db`
+brings it back; passwords and sessions live only in the database.
+
+Upgrading from a version that kept all notes in one folder: the first start converts the data
+folder (after writing `data/backups/pre-layout-v2-*.tar.gz`). For a big folder you can run
+`docker compose run --rm notes notes migrate-layout` first.
 
 ## Command line
 
@@ -53,10 +63,12 @@ Run any of these with `docker compose exec -it notes notes …`:
 | `user disable <name>` / `enable <name>` | lock or unlock an account |
 | `user rm <name> [--purge-data]` | remove a user; without `--purge-data` their files move to `lost+found/`. `--purge-data` asks you to type the name, so run it with `docker compose exec -it` |
 | `backup [dir]` | consistent snapshot → `data/backups/notes-<time>.tar.gz` (safe while running) |
-| `export <user> [file.zip]` | all notes as `.txt` + attachments + `manifest.json` (default: `data/backups/`) |
+| `export <user> [file.zip]` | a folder per note (text, details, images) + `manifest.json` (default: `data/backups/`); also **Export my notes** in the app |
 | `import <user> <zip\|dir>` | restore an export (tags, pins, dates, files), or create notes from `.txt` files |
 | `reindex` | rebuild search |
-| `doctor [--fix]` | check files ↔ database; `--fix` moves orphan files to `lost+found/`, restores missing notes from `.bak` |
+| `doctor [--fix]` | check files ↔ database; `--fix` moves stray files to `lost+found/`, restores missing notes from `.bak`, copies missing images back from another note. Users can run their own check from **Account & data → Check my notes** |
+| `migrate-layout` | convert an older data folder to one folder per note (the server also does this on its first start) |
+| `rebuild-db` | refill a new, empty database from the note folders, then `user passwd` each user |
 | `gc` | run maintenance now (trash purge, stale uploads, sessions) — the server already does this hourly |
 
 `doctor --fix` and `gc` can run while the server is up (they re-check before changing

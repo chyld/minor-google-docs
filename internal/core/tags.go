@@ -86,12 +86,17 @@ type TagPatch struct {
 }
 
 func (s *Store) PatchTag(ctx context.Context, uid, id string, p TagPatch) (*Tag, error) {
+	tx, err := s.DB.W.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
 	if p.Name != nil {
 		name, err := normalizeTagName(*p.Name)
 		if err != nil {
 			return nil, err
 		}
-		res, err := s.DB.W.ExecContext(ctx, `UPDATE tags SET name=? WHERE id=? AND user_id=?`, name, id, uid)
+		res, err := tx.Exec(`UPDATE tags SET name=? WHERE id=? AND user_id=?`, name, id, uid)
 		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
 				return nil, Invalid("a tag with that name already exists")
@@ -106,7 +111,7 @@ func (s *Store) PatchTag(ctx context.Context, uid, id string, p TagPatch) (*Tag,
 		if !validColor(*p.Color) {
 			return nil, Invalid("unknown color")
 		}
-		res, err := s.DB.W.ExecContext(ctx, `UPDATE tags SET color=? WHERE id=? AND user_id=?`, *p.Color, id, uid)
+		res, err := tx.Exec(`UPDATE tags SET color=? WHERE id=? AND user_id=?`, *p.Color, id, uid)
 		if err != nil {
 			return nil, err
 		}
@@ -114,18 +119,41 @@ func (s *Store) PatchTag(ctx context.Context, uid, id string, p TagPatch) (*Tag,
 			return nil, ErrNotFound
 		}
 	}
+	// every note with this tag mirrors its name and colour in meta.json
+	if err := markTagNotesDirty(tx, id); err != nil {
+		return nil, err
+	}
 	var t Tag
-	err := s.DB.R.QueryRowContext(ctx, `SELECT id,name,color FROM tags WHERE id=? AND user_id=?`, id, uid).Scan(&t.ID, &t.Name, &t.Color)
-	return &t, notFoundIfNoRows(err)
+	if err := tx.QueryRow(`SELECT id,name,color FROM tags WHERE id=? AND user_id=?`, id, uid).Scan(&t.ID, &t.Name, &t.Color); err != nil {
+		return nil, notFoundIfNoRows(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	s.kickMeta()
+	return &t, nil
 }
 
 func (s *Store) DeleteTag(ctx context.Context, uid, id string) error {
-	res, err := s.DB.W.ExecContext(ctx, `DELETE FROM tags WHERE id=? AND user_id=?`, id, uid)
+	tx, err := s.DB.W.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// queue the notes before the delete cascades their note_tags rows away
+	if err := markTagNotesDirty(tx, id); err != nil {
+		return err
+	}
+	res, err := tx.Exec(`DELETE FROM tags WHERE id=? AND user_id=?`, id, uid)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.kickMeta()
 	return nil
 }

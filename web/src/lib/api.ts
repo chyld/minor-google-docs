@@ -1,4 +1,4 @@
-import type { Attachment, Note, NoteList, NoteMeta, SaveResult, Storage, Tag, User } from './types';
+import type { Attachment, Note, NoteList, NoteMeta, SaveResult, Storage, Tag, User, DoctorJob } from './types';
 
 export class ApiError extends Error {
   constructor(
@@ -61,6 +61,8 @@ export const api = {
   me: () => request<User>('GET', '/api/me'),
   changePassword: (current: string, next: string) => request<void>('PUT', '/api/me/password', { current, new: next }),
   storage: () => request<Storage>('GET', '/api/me/storage'),
+  doctor: () => request<DoctorJob>('GET', '/api/me/doctor'),
+  startDoctor: (fix: boolean) => request<DoctorJob>('POST', '/api/me/doctor', { fix }),
 
   listNotes(q: ListQuery) {
     const p = new URLSearchParams();
@@ -95,5 +97,15 @@ export const api = {
   renameAttachment: (id: string, filename: string) => request<Attachment>('PATCH', `/api/attachments/${id}`, { filename }),
   deleteAttachment: (id: string) => request<void>('DELETE', `/api/attachments/${id}`),
 };
+
+/** Starts a download of the signed-in user's export zip (one folder per note). */
+export function downloadExport() {
+  const a = document.createElement('a');
+  a.href = '/api/export';
+  a.download = '';
+  document.body.append(a);
+  a.click();
+  a.remove();
+}
 
 export const attachmentURL = (id: string, download = false) => `/api/attachments/${id}${download ? '?download=1' : ''}`;

@@ -85,8 +85,13 @@
       if (note && note.id === s.noteId) {
         note.title = r.title;
         note.updated_at = r.updated_at;
+        if (r.attachments) note.attachments = r.attachments;
       }
-      app.upsert({ id: s.noteId, title: r.title, preview: r.preview, updated_at: r.updated_at, sha256: r.sha256, size_bytes: r.size_bytes });
+      if (r.attachments) registry.seed(r.attachments); // pasted images now have their own copy here
+      app.upsert({
+        id: s.noteId, title: r.title, preview: r.preview, updated_at: r.updated_at, sha256: r.sha256, size_bytes: r.size_bytes,
+        ...(r.attachments ? { attachment_count: r.attachments.length } : {}),
+      });
     };
     status = s.status;
     statusDetail = s.detail;

@@ -55,6 +55,18 @@ export interface SaveResult {
   title: string;
   preview: string;
   size_bytes: number;
+  /** The note's attachments, sent when the save copied images pasted from other notes. */
+  attachments?: Attachment[];
+}
+
+/** A "Check my notes" run (GET/POST /api/me/doctor). */
+export interface DoctorJob {
+  running: boolean;
+  fix?: boolean;
+  started_at?: number;
+  finished_at?: number;
+  report?: { problems: string[]; fixed: string[] };
+  error?: string;
 }
 
 export interface Tag {

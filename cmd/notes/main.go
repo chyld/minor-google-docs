@@ -40,6 +40,9 @@ Usage:
   notes reindex                             rebuild the search index
   notes doctor [--fix]                      check files vs database
   notes gc                                  run maintenance once
+  notes migrate-layout                      convert an old data folder to one folder per note
+                                            (the server also does this on its first start)
+  notes rebuild-db                          refill a new, empty database from the note folders
   notes healthcheck                         exit 0 if the server is healthy
 `
 
@@ -71,14 +74,17 @@ func run(cmd string, args []string) error {
 	if cmd != "serve" {
 		log = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	}
-	store, err := core.Open(cfg, log)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if cmd == "migrate-layout" || cmd == "serve" {
+		log = slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
+	store, err := core.OpenWith(ctx, cfg, log, openMode(cmd, args))
 	if err != nil {
 		return err
 	}
 	defer store.Close()
 	store.SyncIndex = cmd != "serve"
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	switch cmd {
 	case "serve":
@@ -160,7 +166,7 @@ func run(cmd string, args []string) error {
 			fmt.Println("fixed:", f)
 		}
 		if !fix {
-			fmt.Println("\nrun `notes doctor --fix` to repair:\n  • orphan files older than 10 minutes move to data/lost+found (never deleted)\n  • notes with a missing file are restored from .bak, or recreated empty\n  • database rows of attachments whose file is missing are removed")
+			fmt.Println("\nrun `notes doctor --fix` to repair:\n  • stray files older than 10 minutes move to data/lost+found (never deleted)\n  • notes with a missing file are restored from .bak, or recreated empty\n  • missing images are copied back from another note that has the same image\n  • waiting image copies are finished; meta.json and user.json are rewritten")
 		}
 	case "gc":
 		if err := store.JanitorOnce(ctx); err != nil {
@@ -170,6 +176,23 @@ func run(cmd string, args []string) error {
 			return err
 		}
 		fmt.Println("maintenance complete")
+	case "migrate-layout":
+		fmt.Println("✓ the data folder uses one folder per note")
+	case "rebuild-db":
+		rep, err := store.RebuildDB(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("restored %d users, %d notes, %d images\n", len(rep.Users), rep.Notes, rep.Images)
+		for _, w := range rep.Warnings {
+			fmt.Println("•", w)
+		}
+		if len(rep.Users) > 0 {
+			fmt.Println("\nPasswords are not kept in the note folders. Set one for each user:")
+			for _, u := range rep.Users {
+				fmt.Printf("  notes user passwd %s\n", u)
+			}
+		}
 	default:
 		fmt.Fprint(os.Stderr, usage)
 		return fmt.Errorf("unknown command %q", cmd)
@@ -177,10 +200,28 @@ func run(cmd string, args []string) error {
 	return nil
 }
 
+// openMode says what a command may do with a data folder still in the old layout:
+// the server and migrate-layout convert it; database-only commands and backups
+// run on it as is; everything else refuses until it is converted.
+func openMode(cmd string, args []string) core.OpenMode {
+	switch cmd {
+	case "serve", "migrate-layout":
+		return core.ModeConvert
+	case "backup":
+		return core.ModeLegacy
+	case "user":
+		if len(args) > 0 && (args[0] == "passwd" || args[0] == "list" || args[0] == "disable" || args[0] == "enable") {
+			return core.ModeLegacy
+		}
+	}
+	return core.ModeRefuse
+}
+
 func serve(ctx context.Context, cfg *config.Config, store *core.Store, log *slog.Logger) error {
 	if err := store.Reconcile(ctx); err != nil {
 		log.Error("startup reconcile", "err", err)
 	}
+	go store.RunMetaWriter(ctx)
 	srv, err := server.New(cfg, store, log)
 	if err != nil {
 		return err

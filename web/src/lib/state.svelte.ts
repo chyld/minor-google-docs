@@ -50,6 +50,8 @@ class AppState {
 
   paletteOpen = $state(false);
   accountOpen = $state(false);
+  /** Start "Check my notes" as soon as Account & data opens (from the palette). */
+  checkOnOpen = $state(false);
   shortcutsOpen = $state(false);
   lightbox = $state<{ noteId: string; ref: string } | null>(null);
 

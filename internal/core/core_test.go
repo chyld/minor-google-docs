@@ -178,7 +178,7 @@ func TestTrashAndPurgeRemovesFiles(t *testing.T) {
 	if err := s.PurgeNote(ctx, u.ID, m.ID, "test"); err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{s.notePath(u.ID, m.ID), s.filePath(u.ID, id)} {
+	for _, p := range []string{s.noteDir(u.ID, m.ID), filepath.Join(s.Dir, "tmp", u.ID, "purge-"+m.ID)} {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
 			t.Fatalf("%s still exists", p)
 		}
@@ -258,7 +258,11 @@ func TestBackupAndDoctor(t *testing.T) {
 	if st, err := os.Stat(out); err != nil || st.Size() == 0 {
 		t.Fatalf("backup missing: %v", err)
 	}
-	orphan := s.filePath(u.ID, NewID())
+	n, _ := s.CreateNote(ctx, u.ID, "with a stray file")
+	if err := s.ensureFilesDir(u.ID, n.ID); err != nil {
+		t.Fatal(err)
+	}
+	orphan := filepath.Join(s.filesDir(u.ID, n.ID), NewRef()+".png")
 	os.WriteFile(orphan, []byte("orphan"), 0o600)
 	r, err := s.Doctor(ctx, false)
 	if err != nil || len(r.Problems) != 1 {
@@ -363,10 +367,7 @@ func TestFinalizeResumesAfterCrash(t *testing.T) {
 	id := NewID()
 	s.CreateUpload(ctx, u.ID, UploadMeta{ID: id, Ref: NewRef(), NoteID: m.ID, Filename: "f.bin", Length: 3})
 	os.WriteFile(s.tmpPath(u.ID, id), []byte("abc"), 0o600)
-	// crash after the rename, before the row update
-	if err := os.Rename(s.tmpPath(u.ID, id), s.filePath(u.ID, id)); err != nil {
-		t.Fatal(err)
-	}
+	crashAfterMove(t, s, u.ID, id) // crash after the rename, before the row update
 	a, off, err := s.UploadOffset(ctx, u.ID, id)
 	if err != nil || off != 3 || a.State != "ready" {
 		t.Fatalf("resume finalize: off=%d err=%v a=%+v", off, err, a)
@@ -480,11 +481,39 @@ func TestReconcileFinishesInterruptedPurge(t *testing.T) {
 	m, _ := s.CreateNote(ctx, u.ID, "ghost")
 	tr := true
 	s.PatchNote(ctx, u.ID, m.ID, NotePatch{Trashed: &tr})
-	os.Remove(s.notePath(u.ID, m.ID)) // crash after files deleted, before the row
+	// crash after the folder was renamed away, before the row was deleted
+	gone := filepath.Join(s.Dir, "tmp", u.ID, "purge-"+m.ID)
+	if err := os.Rename(s.noteDir(u.ID, m.ID), gone); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.Reconcile(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.GetNote(ctx, u.ID, m.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("ghost note still there: %v", err)
+	}
+	if _, err := os.Stat(gone); !os.IsNotExist(err) {
+		t.Fatalf("purge leftovers still there: %v", err)
+	}
+}
+
+// crashAfterMove does what finalize does up to the rename (type and extension
+// recorded on the row, bytes moved), as if the process died before marking it ready.
+func crashAfterMove(t *testing.T, s *Store, uid, id string) {
+	t.Helper()
+	a, err := s.getAtt(context.Background(), uid, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, _ := readHead(s.tmpPath(uid, id))
+	a.Ext = sniffExt(head)
+	if _, err := s.DB.W.Exec(`UPDATE attachments SET ext=? WHERE id=?`, a.Ext, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ensureFilesDir(uid, a.NoteID); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsx.MoveDurable(s.tmpPath(uid, id), s.attPath(uid, a)); err != nil {
+		t.Fatal(err)
 	}
 }

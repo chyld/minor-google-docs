@@ -34,4 +34,4 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 5m         # the first start after an upgrade may convert the data folder

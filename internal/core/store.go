@@ -56,9 +56,22 @@ type Store struct {
 	// SyncIndex indexes on the spot instead of queueing. CLI commands set it:
 	// they have no background indexer, so queued updates would be lost.
 	SyncIndex bool
+
+	// Legacy is set when the data folder was opened in its old layout (ModeLegacy):
+	// only database-only commands and backups may run.
+	Legacy bool
+
+	metaCh chan struct{} // wakes the meta.json writer
 }
 
+// Open opens the data folder, converting an old layout first (see OpenWith).
 func Open(cfg *config.Config, log *slog.Logger) (*Store, error) {
+	return OpenWith(context.Background(), cfg, log, ModeConvert)
+}
+
+// OpenWith opens the data folder. mode decides what happens when it still uses
+// the old flat layout (SPEC §3.3).
+func OpenWith(ctx context.Context, cfg *config.Config, log *slog.Logger, mode OpenMode) (*Store, error) {
 	dir := cfg.DataDir
 	for _, d := range []string{"db", "tmp", "users", "backups", "lost+found"} {
 		if err := os.MkdirAll(filepath.Join(dir, d), fsx.DirMode); err != nil {
@@ -68,11 +81,21 @@ func Open(cfg *config.Config, log *slog.Logger) (*Store, error) {
 	if same, err := fsx.SameFS(filepath.Join(dir, "tmp"), filepath.Join(dir, "users")); err != nil || !same {
 		return nil, fmt.Errorf("data/tmp and data/users must be on the same filesystem")
 	}
-	d, err := db.Open(dir)
+	unlock, err := lockLayout(dir, log)
 	if err != nil {
 		return nil, err
 	}
-	return &Store{Cfg: cfg, DB: d, Dir: dir, Log: log, indexCh: make(chan string, 1024)}, nil
+	defer unlock()
+	d, err := db.Open(dir, 1) // the conversion backs up the old schema before migrating
+	if err != nil {
+		return nil, err
+	}
+	s := &Store{Cfg: cfg, DB: d, Dir: dir, Log: log, indexCh: make(chan string, 1024), metaCh: make(chan struct{}, 1)}
+	if err := s.settle(ctx, mode); err != nil {
+		d.Close()
+		return nil, err
+	}
+	return s, nil
 }
 
 func (s *Store) Close() { s.DB.Close() }
@@ -89,26 +112,6 @@ func (s *Store) Ping(ctx context.Context) error {
 	}
 	f.Close()
 	return os.Remove(f.Name())
-}
-
-// ---- paths ----
-
-func (s *Store) userDir(uid string) string { return filepath.Join(s.Dir, "users", uid) }
-func (s *Store) notePath(uid, id string) string {
-	return filepath.Join(s.Dir, "users", uid, "notes", id+".txt")
-}
-func (s *Store) filePath(uid, id string) string {
-	return filepath.Join(s.Dir, "users", uid, "files", id)
-}
-func (s *Store) tmpPath(uid, id string) string { return filepath.Join(s.Dir, "tmp", uid, id) }
-
-func (s *Store) ensureUserDirs(uid string) error {
-	for _, d := range []string{"notes", "files"} {
-		if err := os.MkdirAll(filepath.Join(s.userDir(uid), d), fsx.DirMode); err != nil {
-			return err
-		}
-	}
-	return os.MkdirAll(filepath.Join(s.Dir, "tmp", uid), fsx.DirMode)
 }
 
 // ---- ids & time ----

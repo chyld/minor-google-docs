@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -42,6 +43,9 @@ type SaveResult struct {
 	Title     string `json:"title"`
 	Preview   string `json:"preview"`
 	SizeBytes int64  `json:"size_bytes"`
+	// Attachments is the note's full list, sent only when the save copied images
+	// pasted from other notes into this note's folder.
+	Attachments []Attachment `json:"attachments,omitempty"`
 }
 
 const noteCols = `n.id,n.title,n.preview,n.pinned,n.trashed_at,n.created_at,n.updated_at,n.size_bytes,n.content_sha256,
@@ -58,8 +62,8 @@ func scanMeta(sc interface{ Scan(...any) error }) (NoteMeta, error) {
 	return m, err
 }
 
-// CreateNote writes the file first, then the row (a crash leaves an orphan
-// file that `doctor` reports, never a row without a file).
+// CreateNote writes the note's folder and file first, then the row (a crash
+// leaves an orphan folder that `doctor` reports, never a row without a file).
 func (s *Store) CreateNote(ctx context.Context, uid, body string) (*NoteMeta, error) {
 	body, err := NormalizeBody(body)
 	if err != nil {
@@ -69,7 +73,11 @@ func (s *Store) CreateNote(ctx context.Context, uid, body string) (*NoteMeta, er
 		return nil, err
 	}
 	id := NewID()
+	if err := os.Mkdir(s.noteDir(uid, id), fsx.DirMode); err != nil {
+		return nil, err
+	}
 	if err := fsx.WriteAtomic(s.notePath(uid, id), []byte(body)); err != nil {
+		os.RemoveAll(s.noteDir(uid, id))
 		return nil, err
 	}
 	t := now()
@@ -78,11 +86,26 @@ func (s *Store) CreateNote(ctx context.Context, uid, body string) (*NoteMeta, er
 	_, err = s.DB.W.ExecContext(ctx, `INSERT INTO notes(id,user_id,title,preview,created_at,updated_at,size_bytes,content_sha256) VALUES(?,?,?,?,?,?,?,?)`,
 		m.ID, uid, m.Title, m.Preview, t, t, m.SizeBytes, m.SHA256)
 	if err != nil {
-		os.Remove(s.notePath(uid, id))
+		os.RemoveAll(s.noteDir(uid, id))
 		return nil, err
 	}
 	s.enqueueIndex(id)
+	s.writeMeta(ctx, uid, id)
+	if n, err := s.queueCopies(ctx, uid, id, "", body); err != nil {
+		s.Log.Warn("queue image copies", "note", id, "err", err)
+	} else if n > 0 {
+		if _, err := s.runPending(ctx, uid, id); err != nil {
+			s.Log.Warn("image copy", "note", id, "err", err)
+		}
+		m.AttachmentCount = s.countReady(ctx, id)
+	}
 	return &m, nil
+}
+
+func (s *Store) countReady(ctx context.Context, id string) int {
+	var n int
+	s.DB.R.QueryRowContext(ctx, `SELECT COUNT(*) FROM attachments WHERE note_id=? AND state='ready'`, id).Scan(&n)
+	return n
 }
 
 func (s *Store) readBody(uid, id string) (string, error) {
@@ -120,8 +143,27 @@ func (s *Store) GetNote(ctx context.Context, uid, id string) (*Note, error) {
 	return &Note{NoteMeta: m, Body: body, Attachments: atts}, nil
 }
 
-// SaveBody implements the save protocol in SPEC §5.1.
+// SaveBody implements the save protocol in SPEC §5.1. Images pasted from other
+// notes are then copied into this note's folder (outside the note lock, since
+// a copy also locks its source note).
 func (s *Store) SaveBody(ctx context.Context, uid, id, body, base string) (*SaveResult, error) {
+	res, err := s.saveBody(ctx, uid, id, body, base)
+	if err != nil {
+		return nil, err
+	}
+	n, err := s.runPending(ctx, uid, id)
+	if err != nil {
+		s.Log.Warn("image copy (retried later)", "note", id, "err", err)
+	}
+	if n > 0 {
+		if atts, err := s.ListAttachments(ctx, uid, id); err == nil {
+			res.Attachments = atts
+		}
+	}
+	return res, nil
+}
+
+func (s *Store) saveBody(ctx context.Context, uid, id, body, base string) (*SaveResult, error) {
 	body, err := NormalizeBody(body)
 	if err != nil {
 		return nil, err
@@ -155,11 +197,17 @@ func (s *Store) SaveBody(ctx context.Context, uid, id, body, base string) (*Save
 				return nil, err
 			}
 			s.enqueueIndex(id)
+			s.writeMeta(dbctx, uid, id)
 		}
 		return res, nil
 	}
 	if curSHA != base {
 		return nil, &ConflictError{CurrentBody: cur, CurrentSHA256: curSHA}
+	}
+	// queued before the file is written, so a crash can't lose the copy request;
+	// a marker that doesn't end up in the saved text is dropped by runPending
+	if _, err := s.queueCopies(ctx, uid, id, cur, body); err != nil {
+		return nil, err
 	}
 	if cur != "" {
 		if err := fsx.WriteAtomic(path+".bak", []byte(cur)); err != nil {
@@ -178,6 +226,7 @@ func (s *Store) SaveBody(ctx context.Context, uid, id, body, base string) (*Save
 		return nil, err
 	}
 	s.enqueueIndex(id)
+	s.writeMeta(dbctx, uid, id)
 	return res, nil
 }
 
@@ -244,6 +293,7 @@ func (s *Store) PatchNote(ctx context.Context, uid, id string, p NotePatch) (*No
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	s.writeMeta(context.WithoutCancel(ctx), uid, id)
 	if err := s.fillTags(ctx, []*NoteMeta{&m}); err != nil {
 		return nil, err
 	}
@@ -255,20 +305,10 @@ func (s *Store) DuplicateNote(ctx context.Context, uid, id string) (*NoteMeta, e
 	if err != nil {
 		return nil, err
 	}
-	m, err := s.CreateNote(ctx, uid, "")
+	// The copy gets its own images (same refs, real copies), so purging the
+	// original can't break it.
+	m, err := s.CreateNote(ctx, uid, n.Body)
 	if err != nil {
-		return nil, err
-	}
-	// Give the copy its own attachments so purging the original can't break it.
-	body := n.Body
-	for _, a := range n.Attachments {
-		na, err := s.copyAttachment(ctx, uid, m.ID, &a)
-		if err != nil {
-			return nil, err
-		}
-		body = strings.ReplaceAll(body, "[image:"+a.Ref+"]", "[image:"+na.Ref+"]")
-	}
-	if _, err := s.SaveBody(ctx, uid, m.ID, body, m.SHA256); err != nil {
 		return nil, err
 	}
 	tags := n.TagIDs
@@ -276,8 +316,13 @@ func (s *Store) DuplicateNote(ctx context.Context, uid, id string) (*NoteMeta, e
 }
 
 // PurgeNote permanently deletes a trashed note. Idempotent and crash-tolerant:
-// attachments are marked 'deleting' first so the janitor finishes any leftovers.
+// attachments are marked 'deleting' first (so a late upload can't land), then
+// the folder is renamed into tmp/ in one step; a crash after that is finished
+// by reconcile (a trashed row without a folder is an interrupted purge).
 func (s *Store) PurgeNote(ctx context.Context, uid, id, actor string) error {
+	if refs, err := s.readyRefs(ctx, uid, id); err == nil {
+		s.flushPendingFor(ctx, uid, refs) // notes waiting for one of these images copy it first
+	}
 	unlock := s.locks.Lock("note:" + id)
 	defer unlock()
 	m, err := s.noteMeta(ctx, s.DB.R, uid, id)
@@ -287,23 +332,48 @@ func (s *Store) PurgeNote(ctx context.Context, uid, id, actor string) error {
 	if m.TrashedAt == nil {
 		return Invalid("only notes in the trash can be deleted permanently")
 	}
+	refs, err := s.readyRefs(ctx, uid, id)
+	if err != nil {
+		return err
+	}
+	for _, ref := range refs {
+		if err := s.guardLastCopy(ctx, uid, id, ref); err != nil {
+			return err
+		}
+	}
 	if _, err := s.DB.W.ExecContext(ctx, `UPDATE attachments SET state='deleting', updated_at=? WHERE note_id=? AND user_id=?`, now(), id, uid); err != nil {
 		return err
+	}
+	gone := filepath.Join(s.Dir, "tmp", uid, "purge-"+id)
+	if _, err := os.Stat(s.noteDir(uid, id)); err == nil {
+		if err := os.MkdirAll(filepath.Dir(gone), fsx.DirMode); err != nil {
+			return err
+		}
+		os.RemoveAll(gone) // leftover of an earlier attempt
+		if err := fsx.MoveDurable(s.noteDir(uid, id), gone); err != nil {
+			return err
+		}
 	}
 	if err := s.finishDeletingAttachments(ctx, uid, id); err != nil {
 		return err
 	}
-	for _, p := range []string{s.notePath(uid, id), s.notePath(uid, id) + ".bak"} {
-		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return err
-		}
-	}
 	if _, err := s.DB.W.ExecContext(ctx, `DELETE FROM notes WHERE id=? AND user_id=?`, id, uid); err != nil {
 		return err
+	}
+	if err := os.RemoveAll(gone); err != nil {
+		s.Log.Warn("purge leftovers (removed later)", "note", id, "err", err)
 	}
 	s.unindex(id)
 	s.Audit(actor, "note.purge", id)
 	return nil
+}
+
+func (s *Store) readyRefs(ctx context.Context, uid, id string) ([]string, error) {
+	rows, err := s.DB.R.QueryContext(ctx, `SELECT ref FROM attachments WHERE note_id=? AND user_id=? AND state='ready'`, id, uid)
+	if err != nil {
+		return nil, err
+	}
+	return scanStrings(rows)
 }
 
 func (s *Store) EmptyTrash(ctx context.Context, uid string) (int, error) {
@@ -315,12 +385,17 @@ func (s *Store) EmptyTrash(ctx context.Context, uid string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	n := 0
 	for _, id := range ids {
-		if err := s.PurgeNote(ctx, uid, id, uid); err != nil {
-			return 0, err
+		err := s.PurgeNote(ctx, uid, id, uid)
+		if errors.Is(err, ErrCopyPending) {
+			continue // kept until its image has been copied; the next empty or the janitor gets it
+		} else if err != nil && !errors.Is(err, ErrNotFound) {
+			return n, err
 		}
+		n++
 	}
-	return len(ids), nil
+	return n, nil
 }
 
 // ---- listing ----

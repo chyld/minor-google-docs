@@ -62,6 +62,9 @@ func (s *Store) CreateUser(ctx context.Context, name, password string) (*User, e
 		}
 		return nil, err
 	}
+	if err := s.writeUserJSON(ctx, u.ID); err != nil {
+		s.Log.Warn("user.json", "err", err)
+	}
 	if _, err := s.CreateNote(ctx, u.ID, welcomeNote); err != nil {
 		s.Log.Warn("welcome note", "err", err)
 	}
@@ -206,6 +209,9 @@ func (s *Store) SetDisabled(ctx context.Context, name string, disabled bool) err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
+	}
+	if err := s.writeUserJSON(ctx, u.ID); err != nil {
+		s.Log.Warn("user.json", "err", err)
 	}
 	ev := "user.enable"
 	if disabled {

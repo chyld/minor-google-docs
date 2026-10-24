@@ -2,7 +2,7 @@
   import { api, ApiError } from '../lib/api';
   import { app } from '../lib/state.svelte';
   import { bytes } from '../lib/format';
-  import type { Storage } from '../lib/types';
+  import type { DoctorJob, Storage } from '../lib/types';
   import { dialog } from '../lib/a11y';
   import Icon from './Icon.svelte';
 
@@ -15,6 +15,45 @@
 
   $effect(() => {
     api.storage().then((s) => (storage = s)).catch(() => {});
+  });
+
+  // ---- Check my notes: a per-user doctor that runs on the server; we poll for its result ----
+  let job = $state<DoctorJob | null>(null);
+  let checkError = $state('');
+  let poll: ReturnType<typeof setTimeout> | undefined;
+  const checking = $derived(!!job?.running);
+
+  async function follow() {
+    try {
+      job = await api.doctor();
+      if (job.running) poll = setTimeout(follow, 800);
+    } catch (e) {
+      checkError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async function runCheck(fix: boolean) {
+    checkError = '';
+    try {
+      job = await api.startDoctor(fix);
+    } catch (e) {
+      if (!(e instanceof ApiError && e.status === 409)) {
+        checkError = e instanceof Error ? e.message : String(e);
+        return;
+      }
+    }
+    clearTimeout(poll);
+    void follow();
+  }
+
+  $effect(() => {
+    if (app.checkOnOpen) {
+      app.checkOnOpen = false;
+      void runCheck(false);
+    } else {
+      void follow(); // show a check still running (or its last result)
+    }
+    return () => clearTimeout(poll);
   });
 
   async function changePassword(e: SubmitEvent) {
@@ -72,8 +111,42 @@
 
     <section class="modal-section">
       <h3>Export</h3>
-      <p class="muted small">Download every note as a .txt file plus all attachments and a manifest, in one zip.</p>
+      <p class="muted small">Download all your notes in one zip: a folder per note with its text, its details and its images.</p>
       <a class="btn" href="/api/export" download><Icon name="download" size={16} /> Download export</a>
+    </section>
+
+    <section class="modal-section" aria-labelledby="check-title">
+      <h3 id="check-title">Check my notes</h3>
+      <p class="muted small">Makes sure every note, image and details file on the server matches. Nothing is deleted.</p>
+      <div class="check-actions">
+        <button class="btn" onclick={() => runCheck(false)} disabled={checking}><Icon name="check" size={16} /> {checking && !job?.fix ? 'Checking…' : 'Check my notes'}</button>
+        {#if job?.report?.problems.length && !job.running && !job.fix}
+          <button class="btn primary" onclick={() => runCheck(true)}>Repair</button>
+        {/if}
+        {#if checking && job?.fix}<span class="muted small">Repairing…</span>{/if}
+      </div>
+      <div class="check-result" role="status" aria-live="polite">
+        {#if checkError}
+          <p class="form-error">{checkError}</p>
+        {:else if job?.error}
+          <p class="form-error">{job.error}</p>
+        {:else if job?.report && !job.running}
+          {#if job.fix && job.report.fixed.length}
+            <p class="small">Repaired:</p>
+            <ul class="check-list">{#each job.report.fixed as f}<li>{f}</li>{/each}</ul>
+          {/if}
+          {#if job.report.problems.length === 0}
+            <p class="small ok-text"><Icon name="check" size={14} /> No problems found.</p>
+          {:else if job.fix}
+            {#if job.report.fixed.length < job.report.problems.length}
+              <p class="small">Some problems can't be repaired from here. Check again to see what's left; whoever runs the server can look with <code>notes doctor</code>.</p>
+            {/if}
+          {:else}
+            <p class="small">{job.report.problems.length === 1 ? 'Found one problem:' : `Found ${job.report.problems.length} problems:`}</p>
+            <ul class="check-list">{#each job.report.problems as p}<li>{p}</li>{/each}</ul>
+          {/if}
+        {/if}
+      </div>
     </section>
 
     <section class="modal-section">
