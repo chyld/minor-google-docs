@@ -48,9 +48,15 @@
     if (!confirm('Permanently delete every note in the trash?')) return;
     try {
       const r = await api.emptyTrash();
-      app.notes = [];
       app.select(null);
-      app.toast(`Deleted ${r.deleted} ${r.deleted === 1 ? 'note' : 'notes'} forever.`, 'info');
+      if (r.kept) {
+        // an image in them is still being copied to another note: they stay until it's done
+        await app.loadList();
+        app.toast(`Deleted ${r.deleted} ${r.deleted === 1 ? 'note' : 'notes'} forever. ${r.kept === 1 ? 'One note was' : `${r.kept} notes were`} kept for now: an image in ${r.kept === 1 ? 'it' : 'them'} is still being copied to another note. Try again in a moment.`, 'info');
+      } else {
+        app.notes = [];
+        app.toast(`Deleted ${r.deleted} ${r.deleted === 1 ? 'note' : 'notes'} forever.`, 'info');
+      }
     } catch (e) {
       app.error(e);
     }

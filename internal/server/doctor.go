@@ -56,6 +56,7 @@ func (s *Server) handleDoctorStart(w http.ResponseWriter, r *http.Request) {
 	}
 	j := &doctorJob{Running: true, Fix: req.Fix, StartedAt: time.Now().UnixMilli()}
 	s.doctor.jobs[user] = j
+	reply := *j // the goroutine updates j under the lock; answer with a copy
 	s.doctor.mu.Unlock()
 
 	go func() {
@@ -74,5 +75,5 @@ func (s *Server) handleDoctorStart(w http.ResponseWriter, r *http.Request) {
 			s.store.Audit(user, "user.doctor.fix", time.Now().UTC().Format(time.RFC3339))
 		}
 	}()
-	writeJSON(w, http.StatusAccepted, j)
+	writeJSON(w, http.StatusAccepted, reply)
 }

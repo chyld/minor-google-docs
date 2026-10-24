@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"homelab-notes/internal/auth"
 	"homelab-notes/internal/config"
 	"homelab-notes/internal/db"
 	"homelab-notes/internal/fsx"
@@ -206,11 +207,12 @@ func TestConversionResumes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Backup(context.Background(), ""); err != nil { // stand-in for the first run's backup
+	out, err := s.backup(context.Background(), "", "pre-layout-v2-", false) // the first run's backup
+	if err != nil {
 		t.Fatal(err)
 	}
 	s.Close()
-	os.WriteFile(filepath.Join(f.dir, "backups", "pre-layout-v2.done"), []byte("x\n"), 0o600)
+	os.WriteFile(filepath.Join(f.dir, "backups", "pre-layout-v2.done"), []byte(filepath.Base(out)+"\n"), 0o600)
 	// first run: schema migrated, one note moved, the image moved after its ext was stored
 	d, _ := db.Open(f.dir, 0)
 	d.W.Exec(`UPDATE attachments SET ext='png' WHERE id=?`, f.attID)
@@ -233,8 +235,8 @@ func TestConversionResumes(t *testing.T) {
 	if readyCount(t, s, f.b, f.ref) != 1 {
 		t.Fatal("copy not made after resume")
 	}
-	if b, _ := filepath.Glob(filepath.Join(f.dir, "backups", "pre-layout-v2-*.tar.gz")); len(b) != 0 {
-		t.Fatal("resume took a second pre-layout backup")
+	if b, _ := filepath.Glob(filepath.Join(f.dir, "backups", "pre-layout-v2-*.tar.gz")); len(b) != 1 {
+		t.Fatalf("resume took a second pre-layout backup: %v", b)
 	}
 }
 
@@ -383,8 +385,8 @@ func TestPurgeWaitsForPendingCopy(t *testing.T) {
 	if err := s.PurgeNote(ctx, u.ID, a.ID, "test"); !errors.Is(err, ErrCopyPending) {
 		t.Fatalf("purge: %v", err)
 	}
-	if n, err := s.EmptyTrash(ctx, u.ID); err != nil || n != 0 {
-		t.Fatalf("empty trash: %d %v", n, err)
+	if n, kept, err := s.EmptyTrash(ctx, u.ID); err != nil || n != 0 || kept != 1 {
+		t.Fatalf("empty trash: deleted %d kept %d %v", n, kept, err)
 	}
 	s.Cfg.MinFree = 0
 	if err := s.PurgeNote(ctx, u.ID, a.ID, "test"); err != nil {
@@ -610,8 +612,8 @@ func TestRebuildDBFromFolders(t *testing.T) {
 		t.Fatal("trash state lost")
 	}
 	_, hash, _ := s.UserByName(ctx, "alice")
-	if hash != noLogin {
-		t.Fatal("rebuilt user can log in without a new password")
+	if !strings.HasPrefix(hash, "$argon2id$") || auth.VerifyPassword("correct horse battery", hash) || auth.VerifyPassword("", hash) {
+		t.Fatal("rebuilt user can log in without a new password (or has a hash that fails fast)")
 	}
 	if hits, _ := s.ListNotes(ctx, u.ID, ListParams{Q: "Kept"}); len(hits.Items) != 1 {
 		t.Fatal("search not rebuilt")

@@ -140,12 +140,17 @@ func (s *Store) Reconcile(ctx context.Context) error {
 		}
 	}
 	s.removePurgeLeftovers(ctx)
+	// a crash between a database change and its meta.json write leaves the mirror
+	// behind: bring every one up to date (unchanged files aren't rewritten)
+	for _, n := range notes {
+		if err := s.writeMetaErr(ctx, n.uid, n.id); err != nil {
+			s.Log.Warn("meta.json", "note", n.id, "err", err)
+		}
+	}
 	if err := s.DrainMeta(ctx); err != nil {
 		s.Log.Warn("meta.json writer", "err", err)
 	}
-	if err := s.runAllPending(ctx); err != nil {
-		s.Log.Warn("image copies (retried later)", "err", err)
-	}
+	s.runAllPending(ctx)
 	if repaired+reindexed+removed > 0 {
 		s.Log.Info("reconcile", "repaired", repaired, "reindexed", reindexed, "stray_tmp_removed", removed)
 	}
@@ -223,9 +228,7 @@ func (s *Store) JanitorOnce(ctx context.Context) error {
 	errs = append(errs, s.IndexSweep(ctx))
 	s.removePurgeLeftovers(ctx)
 	errs = append(errs, s.DrainMeta(ctx))
-	if err := s.runAllPending(ctx); err != nil {
-		s.Log.Warn("image copies (retried later)", "err", err)
-	}
+	s.runAllPending(ctx)
 	return errors.Join(errs...)
 }
 

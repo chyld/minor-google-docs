@@ -11,8 +11,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"homelab-notes/internal/fsx"
 )
@@ -28,6 +30,7 @@ var (
 	errAlreadyHere = errors.New("already in this note")
 	errNotReady    = errors.New("source still uploading")
 	errNoSource    = errors.New("image not found")
+	errSourceLost  = errors.New("every copy of the image lost its file")
 	ErrCopyPending = errors.New("an image in this note is still being copied to another note; try again in a moment")
 )
 
@@ -47,9 +50,18 @@ func markerRefs(body string) []string {
 	return out
 }
 
+// execer is a *sql.DB or *sql.Tx.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 // queueCopies records markers that body adds (compared with prev) and that the
 // note has no attachment for. Returns how many were queued.
 func (s *Store) queueCopies(ctx context.Context, uid, noteID, prev, body string) (int, error) {
+	return queueCopiesTx(ctx, s.DB.W, uid, noteID, prev, body)
+}
+
+func queueCopiesTx(ctx context.Context, x execer, uid, noteID, prev, body string) (int, error) {
 	old := map[string]bool{}
 	for _, r := range markerRefs(prev) {
 		old[r] = true
@@ -59,7 +71,7 @@ func (s *Store) queueCopies(ctx context.Context, uid, noteID, prev, body string)
 		if old[ref] {
 			continue
 		}
-		res, err := s.DB.W.ExecContext(ctx, `INSERT OR IGNORE INTO pending_copies(note_id,user_id,ref,created_at)
+		res, err := x.ExecContext(ctx, `INSERT OR IGNORE INTO pending_copies(note_id,user_id,ref,created_at)
 SELECT ?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM attachments WHERE note_id=? AND ref=? AND state IN ('ready','uploading'))`,
 			noteID, uid, ref, now(), noteID, ref)
 		if err != nil {
@@ -73,7 +85,7 @@ SELECT ?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM attachments WHERE note_id=? AND r
 }
 
 // queueMissingCopies queues every marker of every note of a user that has no
-// attachment in its note (conversion, doctor).
+// attachment in its note (conversion, rebuild, doctor).
 func (s *Store) queueMissingCopies(ctx context.Context, uid string) error {
 	ids, err := s.noteIDs(ctx, uid)
 	if err != nil {
@@ -91,47 +103,103 @@ func (s *Store) queueMissingCopies(ctx context.Context, uid string) error {
 	return nil
 }
 
+// A marker whose image exists nowhere stays queued this long (its upload may not
+// have been registered yet when the note was saved), then it is dropped.
+const pendingGiveUp = 24 * time.Hour
+
 // runPending makes the copies a note is waiting for. Must be called without
-// holding any note lock. Returns how many images were copied.
+// holding any note lock. Returns how many waiting markers now have their copy
+// in the note (copied now, or found already there).
 func (s *Store) runPending(ctx context.Context, uid, noteID string) (int, error) {
-	rows, err := s.DB.R.QueryContext(ctx, `SELECT ref FROM pending_copies WHERE note_id=? AND user_id=?`, noteID, uid)
+	rows, err := s.DB.R.QueryContext(ctx, `SELECT ref,created_at FROM pending_copies WHERE note_id=? AND user_id=?`, noteID, uid)
 	if err != nil {
 		return 0, err
 	}
-	refs, err := scanStrings(rows)
-	if err != nil || len(refs) == 0 {
-		return 0, err
+	type item struct {
+		ref string
+		at  int64
 	}
-	body := s.readAnyBody(uid, noteID)
-	present := map[string]bool{}
-	for _, r := range markerRefs(body) {
-		present[r] = true
+	var items []item
+	for rows.Next() {
+		var it item
+		if err := rows.Scan(&it.ref, &it.at); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		items = append(items, it)
 	}
-	copied := 0
+	rows.Close()
+	satisfied := 0
 	var errs []error
-	for _, ref := range refs {
-		done := true
-		if present[ref] {
-			err := s.copyRef(ctx, uid, ref, noteID)
-			switch {
-			case err == nil:
-				copied++
-			case errors.Is(err, errAlreadyHere), errors.Is(err, errNoSource), errors.Is(err, ErrNotFound):
-				// nothing (more) to copy: the marker shows "image not found" if there's no image at all
-			default:
-				done = false // still uploading, out of space, I/O error: retried later
-				if !errors.Is(err, errNotReady) {
-					errs = append(errs, fmt.Errorf("copy %s into note %s: %w", ref, noteID, err))
-				}
-			}
+	for _, it := range items {
+		ok, err := s.settleCopy(ctx, uid, noteID, it.ref, time.UnixMilli(it.at))
+		if ok {
+			satisfied++
 		}
-		if done {
-			if _, err := s.DB.W.ExecContext(context.WithoutCancel(ctx), `DELETE FROM pending_copies WHERE note_id=? AND ref=?`, noteID, ref); err != nil {
-				errs = append(errs, err)
-			}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("copy %s into note %s: %w", it.ref, noteID, err))
 		}
 	}
-	return copied, errors.Join(errs...)
+	return satisfied, errors.Join(errs...)
+}
+
+// settleCopy resolves one waiting marker. Everything that decides about the
+// request — the note's text, the source, the copy and removing the request — runs
+// under the note locks, so a save adding the marker again can't slip in between.
+func (s *Store) settleCopy(ctx context.Context, uid, dst, ref string, queuedAt time.Time) (bool, error) {
+	for range 3 {
+		src, _ := s.copySource(ctx, uid, ref, dst) // a peek, to know which notes to lock
+		locks := []string{dst}
+		if src != nil {
+			locks = append(locks, src.NoteID)
+		}
+		unlock := s.lockNotes(locks...)
+		ok, retry, err := s.settleLocked(ctx, uid, dst, ref, queuedAt, src)
+		unlock()
+		if !retry {
+			return ok, err
+		}
+	}
+	return false, nil // the source keeps moving: next run
+}
+
+func (s *Store) settleLocked(ctx context.Context, uid, dst, ref string, queuedAt time.Time, peeked *Attachment) (ok, retry bool, err error) {
+	drop := func() error {
+		_, err := s.DB.W.ExecContext(context.WithoutCancel(ctx), `DELETE FROM pending_copies WHERE note_id=? AND ref=?`, dst, ref)
+		return err
+	}
+	body, err := os.ReadFile(s.notePath(uid, dst))
+	if err != nil {
+		return false, false, nil // can't read the text now (purge in progress, I/O): keep it for later
+	}
+	if !slices.Contains(markerRefs(string(body)), ref) {
+		return false, false, drop() // the marker was removed again
+	}
+	src, err := s.copySource(ctx, uid, ref, dst)
+	switch {
+	case errors.Is(err, errAlreadyHere):
+		return true, false, drop()
+	case errors.Is(err, errNotReady):
+		return false, false, nil
+	case errors.Is(err, errSourceLost):
+		return false, false, drop() // nothing left to copy from; it would block deleting forever
+	case errors.Is(err, errNoSource):
+		if time.Since(queuedAt) > pendingGiveUp {
+			return false, false, drop() // shows as "image not found"
+		}
+		return false, false, nil
+	case err != nil:
+		return false, false, err
+	}
+	if peeked == nil || peeked.NoteID != src.NoteID {
+		return false, true, nil // locked the wrong source note: try again
+	}
+	if err := s.copyLocked(ctx, uid, src, dst); errors.Is(err, errAlreadyHere) {
+		return true, false, drop()
+	} else if err != nil {
+		return false, false, err
+	}
+	return true, false, drop()
 }
 
 // runPendingRef completes the copies waiting for one image (its upload just finished).
@@ -143,16 +211,18 @@ func (s *Store) runPendingRef(ctx context.Context, uid, ref string) {
 	ids, _ := scanStrings(rows)
 	for _, id := range ids {
 		if _, err := s.runPending(ctx, uid, id); err != nil {
-			s.Log.Warn("image copy", "err", err)
+			s.Log.Warn("image copy (retried later)", "err", err)
 		}
 	}
 }
 
 // runAllPending retries every waiting copy (startup, janitor, conversion).
-func (s *Store) runAllPending(ctx context.Context) error {
+// Failures are logged and stay queued; they never fail the caller.
+func (s *Store) runAllPending(ctx context.Context) {
 	rows, err := s.DB.R.QueryContext(ctx, `SELECT DISTINCT user_id,note_id FROM pending_copies`)
 	if err != nil {
-		return err
+		s.Log.Warn("image copies", "err", err)
+		return
 	}
 	var pairs [][2]string
 	for rows.Next() {
@@ -161,18 +231,17 @@ func (s *Store) runAllPending(ctx context.Context) error {
 		pairs = append(pairs, p)
 	}
 	rows.Close()
-	var errs []error
 	for _, p := range pairs {
 		if _, err := s.runPending(ctx, p[0], p[1]); err != nil {
-			errs = append(errs, err)
+			s.Log.Warn("image copy (retried later)", "err", err)
 		}
 	}
-	return errors.Join(errs...)
 }
 
 // lockNotes takes the note locks in id order (so two copies in opposite
 // directions can't deadlock) and returns the unlock.
 func (s *Store) lockNotes(ids ...string) func() {
+	ids = slices.Clone(ids)
 	sort.Strings(ids)
 	var unlocks []func()
 	last := ""
@@ -195,39 +264,75 @@ func (s *Store) copySource(ctx context.Context, uid, ref, noteID string) (*Attac
 	if s.exists(ctx, `SELECT 1 FROM attachments WHERE note_id=? AND user_id=? AND ref=? AND state IN ('ready','uploading')`, noteID, uid, ref) {
 		return nil, errAlreadyHere
 	}
-	a, err := scanAtt(s.DB.R.QueryRowContext(ctx, `SELECT `+attCols+` FROM attachments
- WHERE user_id=? AND ref=? AND state='ready' AND note_id!=? AND ext!='' ORDER BY created_at DESC, id LIMIT 1`, uid, ref, noteID))
-	if errors.Is(err, sql.ErrNoRows) {
-		if s.exists(ctx, `SELECT 1 FROM attachments WHERE user_id=? AND ref=? AND state='uploading'`, uid, ref) {
-			return nil, errNotReady
-		}
-		return nil, errNoSource
+	if s.exists(ctx, `SELECT 1 FROM attachments WHERE note_id=? AND user_id=? AND ref=? AND state='deleting'`, noteID, uid, ref) {
+		return nil, errNotReady // a copy being removed from this note: wait until it's gone
 	}
-	return &a, err
+	rows, err := s.DB.R.QueryContext(ctx, `SELECT `+attCols+` FROM attachments
+ WHERE user_id=? AND ref=? AND state='ready' AND note_id!=? AND ext!='' ORDER BY created_at DESC, id`, uid, ref, noteID)
+	if err != nil {
+		return nil, err
+	}
+	var cands []Attachment
+	for rows.Next() {
+		a, err := scanAtt(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		cands = append(cands, a)
+	}
+	rows.Close()
+	for i := range cands {
+		if fileExists(s.attPath(uid, &cands[i])) {
+			return &cands[i], nil
+		}
+	}
+	if len(cands) > 0 {
+		// copies are listed but none has its file: nothing can be copied (doctor reports it)
+		s.Log.Warn("image copy: no copy of the image has its file", "ref", ref)
+		return nil, errSourceLost
+	}
+	if s.exists(ctx, `SELECT 1 FROM attachments WHERE user_id=? AND ref=? AND state='uploading'`, uid, ref) {
+		return nil, errNotReady
+	}
+	return nil, errNoSource
 }
 
-// copyRef copies an image into dst's own folder: temp file, size and content
-// check, durable rename, then the row (same ref, new id).
+// copyRef copies an image into dst's folder whether or not dst shows it
+// (duplicating a note copies its panel-only files too).
 func (s *Store) copyRef(ctx context.Context, uid, ref, dst string) error {
-	src, err := s.copySource(ctx, uid, ref, dst)
-	if err != nil {
-		return err
+	for range 3 {
+		src, err := s.copySource(ctx, uid, ref, dst)
+		if err != nil {
+			return err
+		}
+		unlock := s.lockNotes(src.NoteID, dst)
+		cur, err := s.copySource(ctx, uid, ref, dst)
+		if err == nil && cur.NoteID == src.NoteID {
+			err = s.copyLocked(ctx, uid, cur, dst)
+			unlock()
+			return err
+		}
+		unlock()
+		if err != nil {
+			return err
+		}
 	}
-	unlock := s.lockNotes(src.NoteID, dst)
-	defer unlock()
-	// re-check under the locks: the source may have been deleted, or a copy made meanwhile
-	if src, err = s.copySource(ctx, uid, ref, dst); err != nil {
-		return err
-	}
+	return errNotReady
+}
+
+// copyLocked copies src into dst's own folder: temp file, size and content
+// check, durable rename, then the row (same ref, new id). Caller holds both note locks.
+func (s *Store) copyLocked(ctx context.Context, uid string, src *Attachment, dst string) error {
 	if _, err := s.noteMeta(ctx, s.DB.R, uid, dst); err != nil {
 		return err
 	}
 	if err := s.ensureFilesDir(uid, dst); err != nil {
 		return err
 	}
-	n := &Attachment{ID: NewID(), Ref: ref, NoteID: dst, Filename: src.Filename, Mime: src.Mime, Ext: src.Ext,
+	n := &Attachment{ID: NewID(), Ref: src.Ref, NoteID: dst, Filename: src.Filename, Mime: src.Mime, Ext: src.Ext,
 		SizeBytes: src.SizeBytes, State: "ready", CreatedAt: now()}
-	sum, err := s.copyBytes(s.attPath(uid, src), s.attPath(uid, n), src.SizeBytes, s.refSHA(ctx, uid, ref))
+	sum, err := s.copyBytes(s.attPath(uid, src), s.attPath(uid, n), src.SizeBytes, s.refSHA(ctx, uid, src.Ref))
 	if err != nil {
 		return err
 	}
@@ -236,11 +341,12 @@ func (s *Store) copyRef(ctx context.Context, uid, ref, dst string) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`INSERT INTO attachments(`+attCols+`,user_id,updated_at,sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-		n.ID, n.Ref, n.NoteID, n.Filename, n.Mime, n.Ext, n.SizeBytes, n.State, n.CreatedAt, uid, n.CreatedAt, sum); err != nil {
+	if err := insertAtt(tx, uid, n, sum); errors.Is(err, ErrRefTaken) {
+		return errAlreadyHere
+	} else if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE ref_content SET sha256=? WHERE user_id=? AND ref=? AND sha256=''`, sum, uid, ref); err != nil {
+	if _, err := tx.Exec(`UPDATE ref_content SET sha256=? WHERE user_id=? AND ref=? AND sha256=''`, sum, uid, src.Ref); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -315,16 +421,53 @@ func (s *Store) copyBytes(src, dst string, size int64, wantSHA string) (string, 
 	return sum, nil
 }
 
-// guardLastCopy refuses to remove the last ready copy of ref (held by noteID)
-// while another note still waits for its own copy. Caller holds noteID's lock.
-func (s *Store) guardLastCopy(ctx context.Context, uid, noteID, ref string) error {
-	if !s.exists(ctx, `SELECT 1 FROM pending_copies WHERE user_id=? AND ref=? AND note_id!=?`, uid, ref, noteID) {
-		return nil
+// fenceDeleting marks a note's attachments (or just one) 'deleting', refusing
+// with ErrCopyPending if that would remove the last ready copy of an image that
+// another note still waits for. Check and update are one immediate transaction,
+// so they serialize with queueCopies and with other deletes.
+func (s *Store) fenceDeleting(ctx context.Context, uid, noteID, attID string) error {
+	tx, err := s.DB.W.BeginTx(ctx, nil)
+	if err != nil {
+		return err
 	}
-	if s.exists(ctx, `SELECT 1 FROM attachments WHERE user_id=? AND ref=? AND state='ready' AND note_id!=?`, uid, ref, noteID) {
-		return nil
+	defer tx.Rollback()
+	q := `SELECT ref FROM attachments WHERE note_id=? AND user_id=? AND state='ready'`
+	args := []any{noteID, uid}
+	if attID != "" {
+		q += ` AND id=?`
+		args = append(args, attID)
 	}
-	return ErrCopyPending
+	rows, err := tx.QueryContext(ctx, q, args...)
+	if err != nil {
+		return err
+	}
+	refs, err := scanStrings(rows)
+	if err != nil {
+		return err
+	}
+	for _, ref := range refs {
+		var waiting, others int
+		err := tx.QueryRowContext(ctx, `SELECT
+ (SELECT COUNT(*) FROM pending_copies WHERE user_id=? AND ref=? AND note_id!=?),
+ (SELECT COUNT(*) FROM attachments WHERE user_id=? AND ref=? AND state='ready' AND note_id!=?)`,
+			uid, ref, noteID, uid, ref, noteID).Scan(&waiting, &others)
+		if err != nil {
+			return err
+		}
+		if waiting > 0 && others == 0 {
+			return ErrCopyPending
+		}
+	}
+	u := `UPDATE attachments SET state='deleting', updated_at=? WHERE note_id=? AND user_id=?`
+	uargs := []any{now(), noteID, uid}
+	if attID != "" {
+		u += ` AND id=?`
+		uargs = append(uargs, attID)
+	}
+	if _, err := tx.ExecContext(ctx, u, uargs...); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // flushPendingFor completes waiting copies of the given refs before their source goes away.

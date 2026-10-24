@@ -419,8 +419,15 @@ func (s *Store) finalize(ctx context.Context, uid string, a *Attachment) error {
 		return ErrNotFound
 	}
 	if err := s.ensureFilesDir(uid, a.NoteID); err != nil {
-		os.Remove(tmp) // the note was purged: don't recreate its folder
-		return ErrNotFound
+		// Only a purge or cancel (the row no longer 'uploading') makes the bytes
+		// garbage. Any other failure keeps them for a retry or for doctor.
+		var state string
+		qerr := s.DB.W.QueryRowContext(ctx, `SELECT state FROM attachments WHERE id=? AND user_id=?`, a.ID, uid).Scan(&state)
+		if errors.Is(qerr, sql.ErrNoRows) || (qerr == nil && state != "uploading") {
+			os.Remove(tmp)
+			return ErrNotFound
+		}
+		return err
 	}
 	if err := fsx.MoveDurable(tmp, s.attPath(uid, a)); err != nil {
 		return err
@@ -557,13 +564,14 @@ func (s *Store) DeleteAttachment(ctx context.Context, uid, id string) error {
 	if a, err = s.getAtt(ctx, uid, id); err != nil {
 		return err
 	}
-	if a.State == "ready" {
-		if err := s.guardLastCopy(ctx, uid, a.NoteID, a.Ref); err != nil {
-			return Invalid("%s", err.Error())
-		}
+	if err := s.fenceDeleting(ctx, uid, a.NoteID, id); err != nil {
+		return err // ErrCopyPending → 409 copy_pending
 	}
-	if _, err := s.DB.W.ExecContext(ctx, `UPDATE attachments SET state='deleting', updated_at=? WHERE id=? AND user_id=?`, now(), id, uid); err != nil {
-		return err
+	if a.State != "ready" {
+		// uploading (a cancel) or already deleting: fence those too
+		if _, err := s.DB.W.ExecContext(ctx, `UPDATE attachments SET state='deleting', updated_at=? WHERE id=? AND user_id=?`, now(), id, uid); err != nil {
+			return err
+		}
 	}
 	return s.removeAttachment(context.WithoutCancel(ctx), uid, id)
 }
@@ -654,6 +662,15 @@ func (s *Store) GCUploads(ctx context.Context, maxAge time.Duration) (int, error
 			last = st.ModTime()
 		}
 		if err == nil && state == "uploading" && last.Before(cutoff) {
+			// bytes already moved into the note (finalize crashed before marking it
+			// ready): finish it instead of throwing the only copy away
+			if a, err := s.getAtt(ctx, u[0], u[1]); err == nil && a.Ext != "" && fileExists(s.attPath(u[0], a)) {
+				if _, _, err := s.uploadOffset(ctx, u[0], u[1]); err != nil {
+					s.Log.Warn("finishing an interrupted upload", "id", u[1], "err", err)
+				}
+				unlock()
+				continue
+			}
 			if err := s.removeAttachment(ctx, u[0], u[1]); err != nil {
 				unlock()
 				return n, err

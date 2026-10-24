@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
+	"homelab-notes/internal/auth"
 	"homelab-notes/internal/fsx"
 )
 
@@ -21,8 +23,6 @@ type RebuildReport struct {
 	Warnings []string
 }
 
-// noLogin is stored as the password of rebuilt accounts: it never verifies.
-const noLogin = "!rebuilt-needs-a-new-password"
 
 // RebuildDB recreates users, tags, notes and images from the data folder
 // (user.json, meta.json, note.txt, files/) into an empty database (SPEC §3.4).
@@ -62,14 +62,27 @@ func (s *Store) RebuildDB(ctx context.Context) (*RebuildReport, error) {
 		if u.CreatedAt <= 0 {
 			u.CreatedAt = t
 		}
+		// a real hash of a random password nobody knows: logins fail at normal speed
+		// (no timing tell) until `notes user passwd` sets one
+		hash, err := auth.HashPassword(NewID() + NewRef() + NewRef())
+		if err != nil {
+			return r, err
+		}
 		if _, err := s.DB.W.ExecContext(ctx, `INSERT INTO users(id,username,password_hash,disabled,created_at,updated_at) VALUES(?,?,?,?,?,?)`,
-			uid, name, noLogin, u.Disabled, u.CreatedAt, t); err != nil {
+			uid, name, hash, u.Disabled, u.CreatedAt, t); err != nil {
 			warn("skipped user %s: %v", name, err)
 			continue
 		}
 		r.Users = append(r.Users, name)
 		if err := s.rebuildNotes(ctx, uid, r, warn); err != nil {
 			return r, err
+		}
+		// copies that were still waiting when the database was lost
+		if err := s.queueMissingCopies(ctx, uid); err != nil {
+			return r, err
+		}
+		if err := s.runAllPendingFor(ctx, uid); err != nil {
+			warn("some image copies are still waiting: %v", err)
 		}
 		s.Audit("cli", "user.rebuild", name)
 	}
@@ -80,6 +93,7 @@ func (s *Store) RebuildDB(ctx context.Context) (*RebuildReport, error) {
 }
 
 func (s *Store) rebuildNotes(ctx context.Context, uid string, r *RebuildReport, warn func(string, ...any)) error {
+	stamp := time.Now().UTC().Format("20060102T150405Z")
 	tagIDs := map[string]string{} // name → id
 	tagColor := map[string]string{}
 	entries, _ := os.ReadDir(s.notesDir(uid))
@@ -94,7 +108,9 @@ func (s *Store) rebuildNotes(ctx context.Context, uid string, r *RebuildReport, 
 			continue
 		}
 		var m metaFile
+		skipped := false
 		if err := readJSONFile(s.metaPath(uid, id), &m); err != nil || m.ID != id {
+			skipped = fileExists(s.metaPath(uid, id)) // unreadable: keep it aside before rewriting
 			// text without its details: keep the text, with the folder's dates
 			m = metaFile{ID: id}
 			if st, err := os.Stat(s.notePath(uid, id)); err == nil {
@@ -150,6 +166,7 @@ func (s *Store) rebuildNotes(ctx context.Context, uid string, r *RebuildReport, 
 		for _, a := range m.Attachments {
 			if !ValidRef(a.Ref) || !validExt(a.Ext) {
 				warn("note %s: skipped an image with an invalid name", id)
+				skipped = true
 				continue
 			}
 			att := &Attachment{ID: NewID(), Ref: a.Ref, NoteID: id, Filename: SanitizeFilename(a.Filename), Mime: a.Mime,
@@ -158,6 +175,7 @@ func (s *Store) rebuildNotes(ctx context.Context, uid string, r *RebuildReport, 
 			st, err := os.Lstat(path)
 			if err != nil || !st.Mode().IsRegular() {
 				warn("note %s: the image %q is missing", id, a.Filename)
+				skipped = true
 				continue
 			}
 			sum, err := fsx.HashFile(path)
@@ -176,6 +194,7 @@ func (s *Store) rebuildNotes(ctx context.Context, uid string, r *RebuildReport, 
 			if err := tx.QueryRow(`SELECT sha256 FROM ref_content WHERE user_id=? AND ref=?`, uid, a.Ref).Scan(&have); err == nil {
 				if have != sum {
 					warn("note %s: the image %q has different content than its copies elsewhere; skipped", id, a.Filename)
+					skipped = true
 					continue
 				}
 			} else if _, err := tx.Exec(`INSERT INTO ref_content(user_id,ref,sha256) VALUES(?,?,?)`, uid, a.Ref, sum); err != nil {
@@ -184,6 +203,7 @@ func (s *Store) rebuildNotes(ctx context.Context, uid string, r *RebuildReport, 
 			}
 			if err := insertAtt(tx, uid, att, sum); err != nil {
 				warn("note %s: image %q: %v", id, a.Filename, err)
+				skipped = true
 				continue
 			}
 			images++
@@ -193,6 +213,15 @@ func (s *Store) rebuildNotes(ctx context.Context, uid string, r *RebuildReport, 
 		}
 		r.Notes++
 		r.Images += images
+		if skipped {
+			// keep the original details (names, refs, dates of what couldn't be restored)
+			if b, err := os.ReadFile(s.metaPath(uid, id)); err == nil {
+				keep := filepath.Join(s.Dir, "lost+found", "rebuild-"+stamp, "users", uid, "notes", id, "meta.json")
+				if os.MkdirAll(filepath.Dir(keep), fsx.DirMode) == nil && fsx.WriteAtomic(keep, b) == nil {
+					warn("note %s: its original meta.json is kept in lost+found", id)
+				}
+			}
+		}
 		s.writeMeta(ctx, uid, id)
 	}
 	sort.Strings(r.Users)

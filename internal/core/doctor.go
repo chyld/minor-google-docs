@@ -57,10 +57,16 @@ func (s *Store) Doctor(ctx context.Context, fix bool) (*DoctorReport, error) {
 		if users[e.Name()] {
 			continue
 		}
+		if fileExists(filepath.Join(s.Dir, "users", e.Name(), "user.json")) || s.hasNoteFolders(e.Name()) {
+			// an account the database doesn't know but whose notes are here: most
+			// likely a lost database. Moving it would leave rebuild-db nothing to read.
+			r.problem("folder users/%s holds notes of an account the database doesn't know (if the database was lost, run `notes rebuild-db`); left in place", e.Name())
+			continue
+		}
 		r.problem("folder users/%s belongs to no user", e.Name())
 		if fix {
 			uid := e.Name()
-			s.doctorMove(r, filepath.Join(s.Dir, "users", uid), batch, func() bool {
+			s.doctorMove(r, filepath.Join(s.Dir, "users", uid), batch, true, func() bool {
 				return !s.exists(ctx, `SELECT 1 FROM users WHERE id=?`, uid)
 			})
 		}
@@ -79,7 +85,7 @@ func (s *Store) Doctor(ctx context.Context, fix bool) (*DoctorReport, error) {
 			if !s.exists(ctx, `SELECT 1 FROM attachments WHERE id=? AND state='uploading'`, fid) {
 				r.problem("stray upload tmp/%s/%s", d.Name(), fid)
 				if fix {
-					s.doctorMove(r, filepath.Join(s.Dir, "tmp", d.Name(), fid), batch, func() bool {
+					s.doctorMove(r, filepath.Join(s.Dir, "tmp", d.Name(), fid), batch, true, func() bool {
 						return !s.exists(ctx, `SELECT 1 FROM attachments WHERE id=? AND state='uploading'`, fid)
 					})
 				}
@@ -93,14 +99,19 @@ func (s *Store) Doctor(ctx context.Context, fix bool) (*DoctorReport, error) {
 }
 
 // doctorMove quarantines an orphan unless it is young or no longer an orphan.
-func (s *Store) doctorMove(r *DoctorReport, path, batch string, stillOrphan func() bool) {
+// The web report says it in plain words; only the CLI names the place.
+func (s *Store) doctorMove(r *DoctorReport, path, batch string, cli bool, stillOrphan func() bool) {
 	st, err := os.Stat(path)
 	if err != nil || time.Since(st.ModTime()) < doctorGrace || !stillOrphan() {
 		return
 	}
 	if dst, err := s.quarantine(path, batch); err == nil {
-		rel, _ := filepath.Rel(s.Dir, dst)
-		r.fixed("moved a stray file to %s", rel)
+		if cli {
+			rel, _ := filepath.Rel(s.Dir, dst)
+			r.fixed("moved a stray file to %s", rel)
+		} else {
+			r.fixed("set a stray file aside on the server (nothing was deleted)")
+		}
 	}
 }
 
@@ -137,12 +148,22 @@ func (s *Store) doctorUser(ctx context.Context, uid string, fix bool, r *DoctorR
 	}
 	rows.Close()
 
+	// a missing (or emptied) notes folder means a volume that isn't mounted, not
+	// lost notes: report it and repair nothing that would write into the wrong place
+	if _, err := os.Stat(s.notesDir(uid)); err != nil || (len(notes) > 1 && !s.hasNoteFolders(uid)) {
+		r.problem("the folder holding these notes can't be read on the server (is the data volume mounted?)")
+		return nil
+	}
+
 	// 1. every note has its folder and text
 	for _, n := range notes {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if _, err := os.Stat(s.notePath(uid, n.id)); !errors.Is(err, fs.ErrNotExist) {
+		if _, err := os.Stat(s.notePath(uid, n.id)); err == nil {
+			continue
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			r.problem("%s can't be read on the server", label(n))
 			continue
 		}
 		if n.trashed {
@@ -188,6 +209,12 @@ func (s *Store) doctorUser(ctx context.Context, uid string, fix bool, r *DoctorR
 		}
 		expected[a.NoteID][a.Ref+"."+a.Ext] = true
 		if a.Ext != "" && fileExists(s.attPath(uid, &a)) {
+			// the bytes themselves, not the stored hash: one ref must be one content
+			if want := s.refSHA(ctx, uid, a.Ref); want != "" {
+				if got, err := fsx.HashFile(s.attPath(uid, &a)); err == nil && got != want {
+					r.problem("%s: the image “%s” has different content than its other copies", label(byID[a.NoteID]), a.Filename)
+				}
+			}
 			continue
 		}
 		n := byID[a.NoteID]
@@ -252,16 +279,6 @@ func (s *Store) doctorUser(ctx context.Context, uid string, fix bool, r *DoctorR
 		}
 	}
 
-	// 5. one ref, one content
-	crows, err := s.DB.R.QueryContext(ctx, `SELECT ref FROM attachments WHERE user_id=? AND state='ready' AND sha256 IS NOT NULL
- GROUP BY ref HAVING COUNT(DISTINCT sha256) > 1`, uid)
-	if err == nil {
-		refs, _ := scanStrings(crows)
-		for _, ref := range refs {
-			r.problem("the image %s has different content in different notes", ref)
-		}
-	}
-
 	// 6. mirrors (meta.json, user.json)
 	for _, n := range notes {
 		if _, err := os.Stat(s.noteDir(uid, n.id)); err != nil {
@@ -299,7 +316,7 @@ func (s *Store) doctorUser(ctx context.Context, uid string, fix bool, r *DoctorR
 			r.problem("%s", what)
 		}
 		if fix {
-			s.doctorMove(r, path, batch, stillOrphan)
+			s.doctorMove(r, path, batch, cli, stillOrphan)
 		}
 	}
 	if _, err := os.Stat(s.legacyFilesDir(uid)); err == nil {
@@ -314,7 +331,7 @@ func (s *Store) doctorUser(ctx context.Context, uid string, fix bool, r *DoctorR
 			continue
 		}
 		if _, ok := byID[id]; !ok {
-			stray(p, "a note folder that belongs to no note", func() bool { return !s.exists(ctx, `SELECT 1 FROM notes WHERE id=?`, id) })
+			stray(p, "a note folder that belongs to no note", func() bool { return !s.exists(ctx, `SELECT 1 FROM notes WHERE id=? AND user_id=?`, id, uid) })
 			continue
 		}
 		inner, _ := os.ReadDir(p)
@@ -344,12 +361,27 @@ func (s *Store) doctorUser(ctx context.Context, uid string, fix bool, r *DoctorR
 	return nil
 }
 
+// hasNoteFolders reports whether a user's notes/ holds at least one note folder.
+func (s *Store) hasNoteFolders(uid string) bool {
+	entries, _ := os.ReadDir(s.notesDir(uid))
+	for _, e := range entries {
+		if e.IsDir() && ValidID(e.Name()) {
+			return true
+		}
+	}
+	return false
+}
+
 // restoreNoteText rewrites a missing note.txt, unless the note was trashed or
-// purged meanwhile (an interrupted purge must not be resurrected).
+// purged meanwhile (an interrupted purge must not be resurrected), or saved
+// meanwhile (the check ran before the lock was taken).
 func (s *Store) restoreNoteText(ctx context.Context, uid, id string, body []byte) bool {
 	unlock := s.locks.Lock("note:" + id)
 	defer unlock()
 	if !s.exists(ctx, `SELECT 1 FROM notes WHERE id=? AND user_id=? AND trashed_at IS NULL`, id, uid) {
+		return false
+	}
+	if _, err := os.Stat(s.notePath(uid, id)); !errors.Is(err, fs.ErrNotExist) {
 		return false
 	}
 	if err := os.MkdirAll(s.noteDir(uid, id), fsx.DirMode); err != nil {
@@ -384,7 +416,7 @@ func (s *Store) restoreImage(ctx context.Context, uid string, a *Attachment) boo
 	if err != nil {
 		return false
 	}
-	s.DB.W.ExecContext(ctx, `UPDATE attachments SET ext=?, sha256=?, updated_at=? WHERE id=?`, dst.Ext, sum, now(), a.ID)
+	s.DB.W.ExecContext(ctx, `UPDATE attachments SET ext=?, sha256=?, updated_at=? WHERE id=? AND user_id=?`, dst.Ext, sum, now(), a.ID, uid)
 	s.writeMeta(ctx, uid, a.NoteID)
 	return true
 }

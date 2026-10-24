@@ -85,7 +85,7 @@ export const api = {
     request<NoteMeta>('PATCH', `/api/notes/${id}`, patch),
   duplicate: (id: string) => request<NoteMeta>('POST', `/api/notes/${id}/duplicate`),
   purge: (id: string) => request<void>('DELETE', `/api/notes/${id}`),
-  emptyTrash: () => request<{ deleted: number }>('POST', '/api/trash/empty'),
+  emptyTrash: () => request<{ deleted: number; kept?: number }>('POST', '/api/trash/empty'),
 
   tags: () => request<{ items: Tag[]; palette: string[] }>('GET', '/api/tags'),
   createTag: (name: string, color = '') => request<Tag>('POST', '/api/tags', { name, color }),

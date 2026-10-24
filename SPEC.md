@@ -126,7 +126,16 @@ once, automatically, by `notes serve` before it starts listening (or ahead of ti
 8. Only then moves what is left in the old places (files with no row) to `lost+found/layout-v2-<ts>/`.
 9. Marks the layout done (`settings.layout_version`, `data/layout`).
 
-Every step can be repeated, so a crash or `SIGTERM` part-way is finished by the next start. Until the
+Every step can be repeated, so a crash or `SIGTERM` part-way is finished by the next start. A
+copy that fails stays queued (§6.3) and never stops the conversion. Image hashes are taken from the
+files, not from the old rows. The backup record is trusted only if the archive it names still
+opens; an archive written just before a crash is adopted. A trashed note whose text was already
+gone (an interrupted purge) gets no folder, so reconcile finishes the purge.
+
+If the database has **no users but the folder still has old-layout notes** (a lost database), every
+command refuses (`ErrLostDBOldLayout`): the old layout keeps tags, pins and image links only in the
+database, so converting would strand the notes. Restore `db/notes.sqlite` from a backup first.
+Folders of accounts the database doesn't know are left to doctor and don't block the layout check. Until the
 folder is converted, other commands refuse to run (they would misread it), except `backup` and
 `user passwd|list|disable|enable`, which only touch the database or copy files verbatim. Restoring an
 old backup later is converted again on the next start. Going back to an older version of the app
@@ -268,12 +277,14 @@ CREATE TABLE indexed(note_id TEXT PRIMARY KEY, content_sha256 TEXT NOT NULL);
 1. Validate: valid UTF-8, no NUL, ≤ 10 MiB; normalize CRLF → LF.
 2. Acquire the **per-note lock** (in-process mutex keyed by note id).
 3. Hash the **current file on disk**. If ≠ `base_sha256` → release, return **409** with
-   `{current_body, current_sha256}`.
-4. Copy current file to `<id>.txt.bak` (one generation).
-5. Write `<id>.<random>.tmp` in the same `notes/` dir → fsync → rename to `<id>.txt` → fsync dir.
-6. `BEGIN IMMEDIATE` → update `title, size_bytes, content_sha256, updated_at` → `COMMIT`.
-7. Release lock. Respond `200 {sha256, updated_at, title}`.
-8. Update `search.sqlite` (best effort, async).
+   `{current_body, current_sha256}`. If it already equals the new body (a retry), it's a success;
+   markers added over `note.txt.bak` are queued again for copying (§6.3).
+4. Queue copies for image markers the new text adds (§6.3), before the file changes.
+5. Copy the current file to `note.txt.bak` (one generation).
+6. Write `note.txt.<random>.tmp` in the note's folder → fsync → rename to `note.txt` → fsync dir.
+7. `BEGIN IMMEDIATE` → update `title, size_bytes, content_sha256, updated_at` → `COMMIT`; rewrite `meta.json`.
+8. Release lock; make the queued copies (§6.3). Respond `200 {sha256, updated_at, title}`.
+9. Update `search.sqlite` (best effort, async).
 
 ### 5.2 Crash recovery (startup reconcile, also `notes doctor`)
 
@@ -350,12 +361,18 @@ folder, with the same ref, so the text never changes and deleting either note ne
   Disk space is leased like an upload's.
 - **Not possible yet** (source still uploading, disk full): the request stays in `pending_copies`
   and is retried when that upload finishes, by the hourly janitor, at startup, and by doctor. The
-  image still shows meanwhile (refs resolve user-wide).
+  image still shows meanwhile (refs resolve user-wide). A marker whose image exists nowhere yet
+  (its upload not registered yet) waits 24 h before it is dropped; one whose every copy lost its
+  file is dropped at once (doctor reports the missing image).
+- **Race-free:** a waiting request is checked against the note's text, copied and removed while
+  holding the note locks, so a save adding the marker again can't slip in between.
 - **Never lost:** deleting forever (or deleting from the panel) the last copy of an image that another
   note still waits for first finishes that copy; if it can't, it is refused with `409 copy_pending`
-  ("an image in this note is still being copied to another note"). Empty trash and the janitor skip
-  such notes until the copy is done.
-- `POST /api/notes/{id}/duplicate` copies the text the same way, so the duplicate has its own images.
+  ("an image in this note is still being copied to another note"). The check and the switch to
+  `deleting` are one immediate transaction, so two deletes (or a delete and a paste) can't both
+  pass it. Empty trash keeps such notes and says how many (`{deleted, kept}`); the janitor retries.
+- `POST /api/notes/{id}/duplicate` gives the duplicate its own copy of every file, including ones
+  only in the attachments panel.
 - `GET /api/refs/{ref}` returns the newest ready copy (all copies have the same content).
 
 ## 7. Uploads & attachments
@@ -498,17 +515,22 @@ a time per user; `GET /api/me/doctor` polls; it isn't tied to the request, so a 
 can't hit the request deadline). It lists problems in plain words, naming notes by title and
 never showing server paths; **Repair** runs it again with `fix`. It checks:
 
+- a missing (or emptied) notes folder: reported as "is the data volume mounted?" and nothing is
+  repaired, so a check never writes empty notes onto the wrong disk;
 - a note without its text: restored from `.bak`, else recreated empty — never for a trashed note
-  (that is an interrupted purge, finished automatically);
+  (that is an interrupted purge, finished automatically), and re-checked under the note lock so a
+  save made meanwhile is never overwritten;
 - an image whose file is missing: copied back from another note with the same image, else reported;
 - an image a note shows but doesn't have: copied in (§6.3), or reported as "no longer exists";
-- copies still waiting; one ref with different content in different notes;
+- copies still waiting; an image file whose bytes differ from its ref's content (hashed);
 - `meta.json` / `user.json` missing or out of date: rewritten;
 - files and folders the database doesn't know (including old-layout leftovers): moved to
   `lost+found/doctor-<ts>/` if older than 10 minutes.
 
 Repairs never delete anything, and never remove database rows. The CLI `notes doctor` runs the same
-check for every user (with paths and ids in its messages) plus the checks that span users.
+check for every user (with paths and ids in its messages) plus the checks that span users. A folder
+of an account the database doesn't know that holds notes is reported and left in place (a lost
+database: `notes rebuild-db` needs it).
 
 ### 9.3 Export
 

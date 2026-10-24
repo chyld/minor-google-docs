@@ -63,7 +63,9 @@ func (s *Store) backup(ctx context.Context, destDir, prefix string, prune bool) 
 	}
 	usersDir := filepath.Join(s.Dir, "users")
 	err = filepath.WalkDir(usersDir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // purged while we walked
+		} else if err != nil {
 			return err
 		}
 		rel, _ := filepath.Rel(s.Dir, p)
@@ -246,7 +248,12 @@ func (s *Store) Export(ctx context.Context, uid string, w io.Writer) error {
 			} else if err != nil {
 				return err
 			}
-			fname := SanitizeFilename(a.Filename)
+			fname := notReserved(SanitizeFilename(strings.Map(func(r rune) rune {
+				if strings.ContainsRune(`\:*?"<>|`, r) {
+					return '_'
+				}
+				return r
+			}, a.Filename)))
 			ext := filepath.Ext(fname)
 			base := strings.TrimSuffix(fname, ext)
 			cand := fname
@@ -295,7 +302,20 @@ func safeName(s string) string {
 	if s == "" {
 		return "Untitled"
 	}
-	return s
+	return notReserved(s)
+}
+
+// notReserved prefixes names Windows can't create (CON, NUL, COM1, …, also with an extension).
+func notReserved(name string) string {
+	base := strings.ToUpper(strings.TrimSpace(strings.SplitN(name, ".", 2)[0]))
+	switch base {
+	case "CON", "PRN", "AUX", "NUL":
+		return "_" + name
+	}
+	if len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) && base[3] >= '0' && base[3] <= '9' {
+		return "_" + name
+	}
+	return name
 }
 
 // Import creates notes for a user from either an export (a .zip or an unzipped
@@ -363,6 +383,17 @@ func (s *Store) importExport(ctx context.Context, uid string, fsys fs.FS, manife
 	fail := func(title string, err error) (int, error) {
 		return n, fmt.Errorf("import stopped after %d notes (at %q): %w", n, title, err)
 	}
+	// Pass 1: every note and its images. Refs are mapped once for the whole export,
+	// so a note that only shows another note's image follows that image's new ref.
+	type pending struct {
+		mn   manifestNote
+		id   string
+		sha  string
+		text string
+	}
+	var notes []pending
+	remap := map[string]string{} // export ref → ref in this account
+	inExport := map[string]bool{}
 	for _, mn := range man.Notes {
 		body, err := readRegular(fsys, mn.File, MaxBodyBytes)
 		if err != nil {
@@ -372,22 +403,42 @@ func (s *Store) importExport(ctx context.Context, uid string, fsys fs.FS, manife
 		if err != nil {
 			return fail(mn.Title, err)
 		}
-		text := string(body)
 		for _, ma := range mn.Attachments {
 			f, err := openRegular(fsys, ma.File)
 			if err != nil {
 				return fail(mn.Title, err)
 			}
-			a, err := s.importAttachment(ctx, uid, m.ID, f, ma.Filename, ma.Ref)
+			want := ma.Ref
+			if r, ok := remap[ma.Ref]; ok {
+				want = r
+			}
+			a, err := s.importAttachment(ctx, uid, m.ID, f, ma.Filename, want)
 			f.Close()
 			if err != nil {
 				return fail(mn.Title, err)
 			}
-			if a.Ref != ma.Ref {
-				text = strings.ReplaceAll(text, "[image:"+ma.Ref+"]", "[image:"+a.Ref+"]")
+			inExport[ma.Ref] = true
+			if _, ok := remap[ma.Ref]; !ok {
+				remap[ma.Ref] = a.Ref
 			}
 		}
-		if _, err := s.SaveBody(ctx, uid, m.ID, text, m.SHA256); err != nil {
+		notes = append(notes, pending{mn: mn, id: m.ID, sha: m.SHA256, text: string(body)})
+	}
+	// Pass 2: the text, with markers rewritten through the export-wide mapping.
+	for _, p := range notes {
+		mn, text := p.mn, p.text
+		for _, ref := range markerRefs(text) {
+			to, ok := remap[ref]
+			if !ok && !inExport[ref] && s.exists(ctx, `SELECT 1 FROM ref_content WHERE user_id=? AND ref=?`, uid, ref) {
+				// an image the export doesn't carry, whose ref means something else here:
+				// leave it "not found" rather than show the wrong picture
+				to, ok = NewRef(), true
+			}
+			if ok && to != ref {
+				text = strings.ReplaceAll(text, "[image:"+ref+"]", "[image:"+to+"]")
+			}
+		}
+		if _, err := s.SaveBody(ctx, uid, p.id, text, p.sha); err != nil {
 			return fail(mn.Title, err)
 		}
 		var tagIDs []string
@@ -401,15 +452,15 @@ func (s *Store) importExport(ctx context.Context, uid string, fsys fs.FS, manife
 			}
 		}
 		pinned, trashed := mn.Pinned, mn.Trashed
-		if _, err := s.PatchNote(ctx, uid, m.ID, NotePatch{Pinned: &pinned, Trashed: &trashed, TagIDs: &tagIDs}); err != nil {
+		if _, err := s.PatchNote(ctx, uid, p.id, NotePatch{Pinned: &pinned, Trashed: &trashed, TagIDs: &tagIDs}); err != nil {
 			return fail(mn.Title, err)
 		}
 		created, _ := time.Parse(time.RFC3339, mn.CreatedAt)
 		updated, _ := time.Parse(time.RFC3339, mn.UpdatedAt)
 		if !created.IsZero() && !updated.IsZero() {
 			s.DB.W.ExecContext(ctx, `UPDATE notes SET created_at=?, updated_at=? WHERE id=? AND user_id=?`,
-				created.UnixMilli(), updated.UnixMilli(), m.ID, uid)
-			s.writeMeta(ctx, uid, m.ID)
+				created.UnixMilli(), updated.UnixMilli(), p.id, uid)
+			s.writeMeta(ctx, uid, p.id)
 		}
 		n++
 	}

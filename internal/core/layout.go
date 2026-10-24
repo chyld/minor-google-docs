@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -61,8 +62,10 @@ func (s *Store) ensureUserDirs(uid string) error {
 // ensureFilesDir creates a note's files/ folder, but never the note folder
 // itself: a note purged meanwhile must not come back as an empty folder.
 func (s *Store) ensureFilesDir(uid, noteID string) error {
-	if st, err := os.Stat(s.noteDir(uid, noteID)); err != nil || !st.IsDir() {
+	if st, err := os.Stat(s.noteDir(uid, noteID)); errors.Is(err, fs.ErrNotExist) || (err == nil && !st.IsDir()) {
 		return ErrNotFound
+	} else if err != nil {
+		return err
 	}
 	if err := os.Mkdir(s.filesDir(uid, noteID), fsx.DirMode); err != nil && !errors.Is(err, fs.ErrExist) {
 		return err
@@ -140,12 +143,13 @@ func (s *Store) layoutDone() bool {
 	return s.DB.W.QueryRow(`SELECT value FROM settings WHERE key='layout_version'`).Scan(&v) == nil && v == layoutVersion
 }
 
-// legacyOnDisk reports whether any old-layout note file or files/ folder is present
-// (e.g. an old backup was restored over a converted folder).
-func (s *Store) legacyOnDisk() bool {
+// legacyOnDisk reports whether an old-layout note file or files/ folder is present
+// (e.g. an old backup was restored over a converted folder). With only set, it
+// looks at those users' folders; folders of no user are doctor's business.
+func (s *Store) legacyOnDisk(only map[string]bool) bool {
 	users, _ := os.ReadDir(filepath.Join(s.Dir, "users"))
 	for _, u := range users {
-		if !u.IsDir() {
+		if !u.IsDir() || (only != nil && !only[u.Name()]) {
 			continue
 		}
 		if _, err := os.Stat(s.legacyFilesDir(u.Name())); err == nil {
@@ -181,18 +185,33 @@ func lockLayout(dir string, log interface{ Warn(string, ...any) }) (func(), erro
 	}, nil
 }
 
+var ErrLostDBOldLayout = errors.New("the database has no users, but the data folder still has notes in the old layout: " +
+	"restore db/notes.sqlite (for example from a backup in data/backups/), or move data/users aside to start fresh")
+
 // settle brings the store to the current layout and schema, or reports why not.
 func (s *Store) settle(ctx context.Context, mode OpenMode) error {
-	done := s.layoutDone()
-	legacy := s.legacyOnDisk()
-	if done && !legacy {
-		return s.DB.Migrate()
-	}
-	var users int
-	if err := s.DB.W.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&users); err != nil {
+	rows, err := s.DB.W.Query(`SELECT id FROM users`)
+	if err != nil {
 		return err
 	}
-	if users == 0 && !legacy {
+	ids, err := scanStrings(rows)
+	if err != nil {
+		return err
+	}
+	known := map[string]bool{}
+	for _, id := range ids {
+		known[id] = true
+	}
+	legacy := s.legacyOnDisk(known)
+	if s.layoutDone() && !legacy {
+		return s.DB.Migrate()
+	}
+	if len(ids) == 0 {
+		if s.legacyOnDisk(nil) {
+			// the old layout keeps tags, pins and image links only in the database:
+			// converting now would strand every note, so stop and say what to do
+			return ErrLostDBOldLayout
+		}
 		// a fresh install (or a lost database over converted folders): nothing to convert
 		if err := s.DB.Migrate(); err != nil {
 			return err
@@ -248,9 +267,9 @@ func (s *Store) convert(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := s.runAllPending(ctx); err != nil {
-		return err
-	}
+	// a copy that fails stays queued (retried at startup, hourly and by doctor);
+	// it never stops the conversion
+	s.runAllPending(ctx)
 	for _, uid := range uids {
 		if err := s.writeUserJSON(ctx, uid); err != nil {
 			return err
@@ -280,13 +299,41 @@ func (s *Store) convert(ctx context.Context) error {
 // conversionBackup checks free space and takes one verified backup of the old
 // layout (old schema too) before anything is changed. A resumed run reuses it.
 func (s *Store) conversionBackup(ctx context.Context) error {
-	doneFile := filepath.Join(s.Dir, "backups", "pre-layout-v2.done")
+	dir := filepath.Join(s.Dir, "backups")
+	doneFile := filepath.Join(dir, "pre-layout-v2.done")
+	partial, _ := filepath.Glob(filepath.Join(dir, "pre-layout-v2-*.tar.gz.partial"))
+	for _, p := range partial {
+		os.Remove(p) // an interrupted earlier attempt
+	}
+	// A finished conversion left data/layout behind: converting again means an old
+	// backup was restored over it, which gets a backup of its own.
+	again := fileExists(s.layoutMarker())
+	if !again && !fileExists(doneFile) {
+		// crashed after writing the archive but before recording it: adopt it
+		if found, _ := filepath.Glob(filepath.Join(dir, "pre-layout-v2-*.tar.gz")); len(found) > 0 {
+			sort.Strings(found)
+			if latest := found[len(found)-1]; verifyArchive(latest) == nil {
+				if err := fsx.WriteAtomic(doneFile, []byte(filepath.Base(latest)+"\n")); err != nil {
+					return err
+				}
+			}
+		}
+	}
 	copies, err := s.copyBytesNeeded(ctx)
 	if err != nil {
 		return err
 	}
 	need := copies + s.Cfg.MinFree
-	_, statErr := os.Stat(doneFile)
+	var statErr error = fs.ErrNotExist
+	if !again {
+		// trust the record only if the archive it names is still there and readable
+		if b, err := os.ReadFile(doneFile); err == nil {
+			name := strings.TrimSpace(string(b))
+			if name != "" && !strings.ContainsAny(name, `/\`) && verifyArchive(filepath.Join(dir, name)) == nil {
+				statErr = nil
+			}
+		}
+	}
 	if statErr != nil {
 		users := dirBytes(filepath.Join(s.Dir, "users"))
 		dbBytes := dirBytes(filepath.Join(s.Dir, "db"))
@@ -306,7 +353,16 @@ func (s *Store) conversionBackup(ctx context.Context) error {
 		return fmt.Errorf("layout: backup %s is unreadable: %w", out, err)
 	}
 	s.Log.Info("layout: backup written", "file", out)
-	return fsx.WriteAtomic(doneFile, []byte(filepath.Base(out)+"\n"))
+	if err := fsx.WriteAtomic(doneFile, []byte(filepath.Base(out)+"\n")); err != nil {
+		return err
+	}
+	if again {
+		// recorded: a resumed run reuses this backup instead of making another
+		if err := os.Remove(s.layoutMarker()); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 func verifyArchive(path string) error {
@@ -413,6 +469,13 @@ func (s *Store) convertUser(ctx context.Context, uid, stamp string) error {
 		return err
 	}
 	for _, id := range ids {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !fileExists(s.legacyNotePath(uid, id)) && !fileExists(s.noteDir(uid, id)) &&
+			s.exists(ctx, `SELECT 1 FROM notes WHERE id=? AND trashed_at IS NOT NULL`, id) {
+			continue // an interrupted purge: no folder, so reconcile finishes it
+		}
 		if err := os.MkdirAll(s.noteDir(uid, id), fsx.DirMode); err != nil {
 			return err
 		}
@@ -450,12 +513,16 @@ func (s *Store) convertUser(ctx context.Context, uid, stamp string) error {
 					return err
 				}
 				a.Ext = sniffExt(head)
+				if a.State == "uploading" {
+					// interrupted after its move: recovery marks it ready without sniffing again
+					a.Mime = detectMime(head, a.Filename)
+				}
 			} else if e := s.findMovedExt(uid, a); e != "" {
 				a.Ext = e
 			} else {
 				continue // bytes missing: doctor reports it
 			}
-			if _, err := s.DB.W.ExecContext(ctx, `UPDATE attachments SET ext=? WHERE id=?`, a.Ext, a.ID); err != nil {
+			if _, err := s.DB.W.ExecContext(ctx, `UPDATE attachments SET ext=?, mime=? WHERE id=?`, a.Ext, a.Mime, a.ID); err != nil {
 				return err
 			}
 		}
@@ -467,6 +534,53 @@ func (s *Store) convertUser(ctx context.Context, uid, stamp string) error {
 		}
 		if err := s.moveInto(src, s.attPath(uid, a), stamp); err != nil {
 			return err
+		}
+	}
+	return s.refreshHashes(ctx, uid)
+}
+
+// refreshHashes records each image's hash from its file, not from the old row
+// (which may be stale), so copies are checked against the real content.
+func (s *Store) refreshHashes(ctx context.Context, uid string) error {
+	rows, err := s.DB.R.QueryContext(ctx, `SELECT `+attCols+` FROM attachments WHERE user_id=? AND state='ready' AND ext!=''`, uid)
+	if err != nil {
+		return err
+	}
+	var atts []Attachment
+	for rows.Next() {
+		a, err := scanAtt(rows)
+		if err != nil {
+			rows.Close()
+			return err
+		}
+		atts = append(atts, a)
+	}
+	rows.Close()
+	byRef := map[string]map[string]bool{}
+	for i := range atts {
+		a := &atts[i]
+		sum, err := fsx.HashFile(s.attPath(uid, a))
+		if err != nil {
+			continue // missing: doctor reports it
+		}
+		if _, err := s.DB.W.ExecContext(ctx, `UPDATE attachments SET sha256=? WHERE id=?`, sum, a.ID); err != nil {
+			return err
+		}
+		if byRef[a.Ref] == nil {
+			byRef[a.Ref] = map[string]bool{}
+		}
+		byRef[a.Ref][sum] = true
+	}
+	for ref, sums := range byRef {
+		if len(sums) != 1 {
+			s.Log.Warn("layout: copies of one image have different content (run `notes doctor`)", "ref", ref)
+			continue
+		}
+		for sum := range sums {
+			if _, err := s.DB.W.ExecContext(ctx, `INSERT INTO ref_content(user_id,ref,sha256) VALUES(?,?,?)
+ ON CONFLICT(user_id,ref) DO UPDATE SET sha256=excluded.sha256`, uid, ref, sum); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -534,9 +648,11 @@ func (s *Store) moveLegacyLeftovers(ctx context.Context, uid, stamp string) erro
 			if s.exists(ctx, `SELECT 1 FROM attachments WHERE id=? AND state IN ('ready','deleting') AND ext!=''`, e.Name()) {
 				return fmt.Errorf("attachment %s was not moved; not touching the old files folder", e.Name())
 			}
-			if _, err := s.quarantine(filepath.Join(s.legacyFilesDir(uid), e.Name()), batch); err != nil {
+			kept, err := s.quarantine(filepath.Join(s.legacyFilesDir(uid), e.Name()), batch)
+			if err != nil {
 				return err
 			}
+			s.Log.Warn("layout: a file belonged to no attachment; set aside", "kept", kept)
 		}
 		if err := os.Remove(s.legacyFilesDir(uid)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
@@ -545,9 +661,11 @@ func (s *Store) moveLegacyLeftovers(ctx context.Context, uid, stamp string) erro
 	entries, _ := os.ReadDir(s.notesDir(uid))
 	for _, e := range entries {
 		if e.Type().IsRegular() {
-			if _, err := s.quarantine(filepath.Join(s.notesDir(uid), e.Name()), batch); err != nil {
+			kept, err := s.quarantine(filepath.Join(s.notesDir(uid), e.Name()), batch)
+			if err != nil {
 				return err
 			}
+			s.Log.Warn("layout: a file belonged to no note; set aside", "kept", kept)
 		}
 	}
 	return nil

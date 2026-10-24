@@ -83,19 +83,32 @@ func (s *Store) CreateNote(ctx context.Context, uid, body string) (*NoteMeta, er
 	t := now()
 	m := NoteMeta{ID: id, Title: DeriveTitle(body), Preview: DerivePreview(body), CreatedAt: t, UpdatedAt: t,
 		SizeBytes: int64(len(body)), SHA256: fsx.HashBytes([]byte(body)), TagIDs: []string{}}
-	_, err = s.DB.W.ExecContext(ctx, `INSERT INTO notes(id,user_id,title,preview,created_at,updated_at,size_bytes,content_sha256) VALUES(?,?,?,?,?,?,?,?)`,
-		m.ID, uid, m.Title, m.Preview, t, t, m.SizeBytes, m.SHA256)
+	// the row and its image-copy requests commit together, so a crash can't lose them
+	n, err := func() (int, error) {
+		tx, err := s.DB.W.BeginTx(ctx, nil)
+		if err != nil {
+			return 0, err
+		}
+		defer tx.Rollback()
+		if _, err := tx.ExecContext(ctx, `INSERT INTO notes(id,user_id,title,preview,created_at,updated_at,size_bytes,content_sha256) VALUES(?,?,?,?,?,?,?,?)`,
+			m.ID, uid, m.Title, m.Preview, t, t, m.SizeBytes, m.SHA256); err != nil {
+			return 0, err
+		}
+		n, err := queueCopiesTx(ctx, tx, uid, id, "", body)
+		if err != nil {
+			return 0, err
+		}
+		return n, tx.Commit()
+	}()
 	if err != nil {
 		os.RemoveAll(s.noteDir(uid, id))
 		return nil, err
 	}
 	s.enqueueIndex(id)
 	s.writeMeta(ctx, uid, id)
-	if n, err := s.queueCopies(ctx, uid, id, "", body); err != nil {
-		s.Log.Warn("queue image copies", "note", id, "err", err)
-	} else if n > 0 {
+	if n > 0 {
 		if _, err := s.runPending(ctx, uid, id); err != nil {
-			s.Log.Warn("image copy", "note", id, "err", err)
+			s.Log.Warn("image copy (retried later)", "note", id, "err", err)
 		}
 		m.AttachmentCount = s.countReady(ctx, id)
 	}
@@ -189,6 +202,12 @@ func (s *Store) saveBody(ctx context.Context, uid, id, body, base string) (*Save
 	dbctx := context.WithoutCancel(ctx) // once the file is renamed, the row must follow even if the client left
 	if sha == curSHA {
 		// Already applied (e.g. a retry after a lost response): success regardless of base.
+		// Re-queue the images this text added over the previous version, in case the
+		// first attempt's request was lost (INSERT OR IGNORE: harmless if it wasn't).
+		prev, _ := os.ReadFile(path + ".bak")
+		if _, err := s.queueCopies(ctx, uid, id, string(prev), body); err != nil {
+			return nil, err
+		}
 		res.UpdatedAt = m.UpdatedAt
 		if m.SHA256 != sha {
 			res.UpdatedAt = now()
@@ -311,6 +330,17 @@ func (s *Store) DuplicateNote(ctx context.Context, uid, id string) (*NoteMeta, e
 	if err != nil {
 		return nil, err
 	}
+	// files only listed in the attachments panel are copied too
+	for _, a := range n.Attachments {
+		err := s.copyRef(ctx, uid, a.Ref, m.ID)
+		switch {
+		case err == nil, errors.Is(err, errAlreadyHere):
+		case errors.Is(err, errSourceLost), errors.Is(err, errNoSource), errors.Is(err, errNotReady):
+			s.Log.Warn("duplicate: an attachment could not be copied", "ref", a.Ref, "err", err)
+		default:
+			return nil, err
+		}
+	}
 	tags := n.TagIDs
 	return s.PatchNote(ctx, uid, m.ID, NotePatch{TagIDs: &tags})
 }
@@ -332,16 +362,11 @@ func (s *Store) PurgeNote(ctx context.Context, uid, id, actor string) error {
 	if m.TrashedAt == nil {
 		return Invalid("only notes in the trash can be deleted permanently")
 	}
-	refs, err := s.readyRefs(ctx, uid, id)
-	if err != nil {
+	if err := s.fenceDeleting(ctx, uid, id, ""); err != nil {
 		return err
 	}
-	for _, ref := range refs {
-		if err := s.guardLastCopy(ctx, uid, id, ref); err != nil {
-			return err
-		}
-	}
-	if _, err := s.DB.W.ExecContext(ctx, `UPDATE attachments SET state='deleting', updated_at=? WHERE note_id=? AND user_id=?`, now(), id, uid); err != nil {
+	// uploads still in flight are fenced too, so they can't land in a purged folder
+	if _, err := s.DB.W.ExecContext(ctx, `UPDATE attachments SET state='deleting', updated_at=? WHERE note_id=? AND user_id=? AND state='uploading'`, now(), id, uid); err != nil {
 		return err
 	}
 	gone := filepath.Join(s.Dir, "tmp", uid, "purge-"+id)
@@ -376,26 +401,28 @@ func (s *Store) readyRefs(ctx context.Context, uid, id string) ([]string, error)
 	return scanStrings(rows)
 }
 
-func (s *Store) EmptyTrash(ctx context.Context, uid string) (int, error) {
+// EmptyTrash deletes every trashed note forever. Notes holding the last copy of
+// an image another note still waits for are kept (counted in kept) until then.
+func (s *Store) EmptyTrash(ctx context.Context, uid string) (deleted, kept int, err error) {
 	rows, err := s.DB.R.QueryContext(ctx, `SELECT id FROM notes WHERE user_id=? AND trashed_at IS NOT NULL`, uid)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	ids, err := scanStrings(rows)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	n := 0
 	for _, id := range ids {
 		err := s.PurgeNote(ctx, uid, id, uid)
 		if errors.Is(err, ErrCopyPending) {
-			continue // kept until its image has been copied; the next empty or the janitor gets it
+			kept++ // the next empty or the janitor gets it
+			continue
 		} else if err != nil && !errors.Is(err, ErrNotFound) {
-			return n, err
+			return deleted, kept, err
 		}
-		n++
+		deleted++
 	}
-	return n, nil
+	return deleted, kept, nil
 }
 
 // ---- listing ----

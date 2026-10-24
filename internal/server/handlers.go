@@ -296,12 +296,12 @@ func (s *Server) handlePurgeNote(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
-	n, err := s.store.EmptyTrash(r.Context(), uid(r))
+	n, kept, err := s.store.EmptyTrash(r.Context(), uid(r))
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]int{"deleted": n})
+	writeJSON(w, http.StatusOK, map[string]int{"deleted": n, "kept": kept})
 }
 
 // ---- tags ----

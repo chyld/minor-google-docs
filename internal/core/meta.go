@@ -166,8 +166,13 @@ func (s *Store) kickMeta() {
 	}
 }
 
-// DrainMeta rewrites every queued meta.json.
+// DrainMeta rewrites every queued meta.json. Each queue entry is removed before
+// its file is rendered, so a tag change landing meanwhile queues the note again
+// instead of being lost; a failed write puts the entry back. One failing note
+// doesn't hold up the others.
 func (s *Store) DrainMeta(ctx context.Context) error {
+	failed := map[string]bool{}
+	var errs []error
 	for {
 		rows, err := s.DB.R.QueryContext(ctx, `SELECT n.user_id,n.id FROM meta_dirty d JOIN notes n ON n.id=d.note_id LIMIT 200`)
 		if err != nil {
@@ -177,18 +182,22 @@ func (s *Store) DrainMeta(ctx context.Context) error {
 		for rows.Next() {
 			var p [2]string
 			rows.Scan(&p[0], &p[1])
-			batch = append(batch, p)
+			if !failed[p[1]] {
+				batch = append(batch, p)
+			}
 		}
 		rows.Close()
 		if len(batch) == 0 {
-			return nil
+			return errors.Join(errs...)
 		}
 		for _, p := range batch {
-			if err := s.writeMetaErr(ctx, p[0], p[1]); err != nil {
-				return err // stays queued; retried on the next drain
-			}
 			if _, err := s.DB.W.ExecContext(ctx, `DELETE FROM meta_dirty WHERE note_id=?`, p[1]); err != nil {
 				return err
+			}
+			if err := s.writeMetaErr(ctx, p[0], p[1]); err != nil {
+				failed[p[1]] = true
+				errs = append(errs, err)
+				s.DB.W.ExecContext(context.WithoutCancel(ctx), `INSERT OR IGNORE INTO meta_dirty(note_id) SELECT id FROM notes WHERE id=?`, p[1])
 			}
 		}
 	}
