@@ -13,6 +13,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func renderPage(t *testing.T, s *Store, uid, id string) string {
@@ -241,7 +244,10 @@ func TestPageImagesAndFiles(t *testing.T) {
 	if !strings.Contains(page, "not shown in the note") || !strings.Contains(page, "from another note") {
 		t.Fatal("file flags")
 	}
-	_ = panelOnly
+	pi := fileIndex(t, s, u.ID, n.ID, panelOnly.ID)
+	if !strings.Contains(page, `<img class="thumb" alt="" decoding="async" data-f="`+strconv.Itoa(pi)+`"`) {
+		t.Fatal("no thumbnail for the image only in the attachments panel")
+	}
 }
 
 func TestPageAbortsWhenAFileShrinks(t *testing.T) {
@@ -515,6 +521,61 @@ func TestPageFileVanishesOrGrows(t *testing.T) {
 	}
 	if got := decodeBlocks(t, buf.String(), 0); !bytes.Equal(got, data) {
 		t.Fatal("the page should hold the snapshot's bytes")
+	}
+	// another (longer) file renamed onto the path: refused, not read as a prefix
+	os.WriteFile(path, data, 0o600)
+	pageBeforeWrite = func(*Page) {
+		tmp := path + ".new"
+		os.WriteFile(tmp, append(bytes.Repeat([]byte("X"), len(data)), "tail"...), 0o600)
+		os.Rename(tmp, path)
+	}
+	p, _ = s.PreparePage(ctx, u.ID, n.ID, "")
+	if _, err := p.WriteTo(&bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("a replaced file: %v", err)
+	}
+	// a FIFO (or symlink) at the path never blocks or is followed
+	pageBeforeWrite = nil
+	os.Remove(path)
+	if err := unix.Mkfifo(path, 0o600); err != nil {
+		t.Skip("no fifo support")
+	}
+	done := make(chan error, 1)
+	go func() {
+		p, err := s.PreparePage(ctx, u.ID, n.ID, "")
+		if err == nil {
+			_, err = p.WriteTo(&bytes.Buffer{})
+		}
+		done <- err
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a FIFO at the file's path hung the page")
+	}
+}
+
+// The estimate for each theme is the size of that theme's page.
+func TestPageSizePerTheme(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	u := newUser(t, s, "alice")
+	n, _ := s.CreateNote(ctx, u.ID, "Themes")
+	for _, th := range []string{"light", "dark", "system", "bogus"} {
+		p, err := s.PreparePage(ctx, u.ID, n.ID, th)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var b bytes.Buffer
+		if k, err := p.WriteTo(&b); err != nil || k != p.Size() || int64(b.Len()) != p.Size() {
+			t.Fatalf("%s: size %d, wrote %d %v", th, p.Size(), b.Len(), err)
+		}
+		want := map[string]string{"light": "light", "dark": "dark"}[th]
+		if want == "" {
+			want = "auto"
+		}
+		if !strings.Contains(b.String(), `data-theme="`+want+`"`) {
+			t.Fatalf("%s: wrong theme", th)
+		}
 	}
 }
 

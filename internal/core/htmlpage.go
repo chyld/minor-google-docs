@@ -20,6 +20,8 @@ import (
 	"unicode"
 	"unicode/utf16"
 
+	"golang.org/x/sys/unix"
+
 	"homelab-notes/internal/pageassets"
 )
 
@@ -51,10 +53,11 @@ type PageFile struct {
 	Att        Attachment
 	path       string
 	size       int64
-	own        bool // in this note (otherwise a copy from another note, shown in the text)
-	shown      bool // shown in the text by a marker
-	missing    bool // no readable file on disk
-	superseded bool // this note's unreadable copy, replaced by another note's (not listed)
+	own        bool        // in this note (otherwise a copy from another note, shown in the text)
+	shown      bool        // shown in the text by a marker
+	info       os.FileInfo // the file as snapshotted: the write refuses a different one
+	missing    bool        // no readable file on disk
+	superseded bool        // this note's unreadable copy, replaced by another note's (not listed)
 	n          int
 }
 
@@ -192,26 +195,40 @@ func (p *Page) addFile(s *Store, a Attachment, own bool) *PageFile {
 	f := &PageFile{Att: a, own: own, n: len(p.files), missing: true}
 	if a.Ext != "" {
 		f.path = s.attPath(p.uid, &a)
-		if size, ok := openable(f.path); ok {
-			f.size, f.missing = size, false
+		if st, ok := openable(f.path); ok {
+			f.info, f.size, f.missing = st, st.Size(), false
 		}
 	}
 	p.files = append(p.files, f)
 	return f
 }
 
-// openable opens a regular file just to prove it can be read, and returns its size.
-func openable(path string) (int64, bool) {
-	fh, err := os.Open(path)
+// openRegular opens a file for reading without following a symlink or waiting on a
+// FIFO, and only if it is a regular file.
+func openRegularFile(path string) (*os.File, os.FileInfo, error) {
+	fh, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
-		return 0, false
+		return nil, nil, err
 	}
-	defer fh.Close()
 	st, err := fh.Stat()
-	if err != nil || !st.Mode().IsRegular() {
-		return 0, false
+	if err == nil && !st.Mode().IsRegular() {
+		err = fmt.Errorf("%s is not a regular file", filepath.Base(path))
 	}
-	return st.Size(), true
+	if err != nil {
+		fh.Close()
+		return nil, nil, err
+	}
+	return fh, st, nil
+}
+
+// openable proves a file can be read and returns what it is.
+func openable(path string) (os.FileInfo, bool) {
+	fh, st, err := openRegularFile(path)
+	if err != nil {
+		return nil, false
+	}
+	fh.Close()
+	return st, true
 }
 
 // pageCopy finds a ready copy of ref in another of the user's notes that can be read.
@@ -433,9 +450,16 @@ func (w *pageWriter) b64(f *PageFile, off, n int64, last bool) {
 	}
 	fh := w.files[f.n]
 	if fh == nil {
+		var st os.FileInfo
 		var err error
-		if fh, err = os.Open(f.path); err != nil {
+		if fh, st, err = openRegularFile(f.path); err != nil {
 			w.err = err
+			return
+		}
+		// another file moved onto the path since the snapshot: its bytes aren't the ones promised
+		if !os.SameFile(st, f.info) || st.Size() < f.size {
+			fh.Close()
+			w.err = fmt.Errorf("%s changed after the page was prepared", f.Att.Filename)
 			return
 		}
 		w.files[f.n] = fh

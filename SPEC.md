@@ -1035,7 +1035,8 @@ which can be saved back from the page. No size limit. The page needs nothing fro
   quietly lacks something. Size and
   WriteTo walk the same renderer, so the estimate, `Content-Length` and the bytes written are equal by
   construction. Files are read with their snapshot sizes, one open at a time (closed after their
-  last block); any read or write failure after the headers resets the connection
+  last block), never following a symlink or waiting on a FIFO; a file swapped for another since the
+  snapshot (a different inode) is refused rather than read as a prefix; any read or write failure after the headers resets the connection
   (`http.ErrAbortHandler`), so the browser reports a failed download, never a page that looks
   complete but isn't. The zip export now does the same. `HEAD` answers the headers only.
 - **Requests from other sites** are refused for the page and the export: `Sec-Fetch-Site` must be
