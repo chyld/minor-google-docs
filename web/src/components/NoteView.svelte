@@ -1,12 +1,12 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
-  import { api, ApiError } from '../lib/api';
+  import { api, ApiError, downloadPage } from '../lib/api';
   import { app } from '../lib/state.svelte';
   import { drafts } from '../lib/drafts';
   import { uploads } from '../lib/uploads.svelte';
   import { registry } from '../lib/registry';
   import { refsIn } from '../lib/editor/markers';
-  import { fullTime, relativeTime, wordCount } from '../lib/format';
+  import { bytes, fullTime, relativeTime, wordCount } from '../lib/format';
   import { hue } from '../lib/colors';
   import { menu } from '../lib/a11y';
   import { PAGE_WIDTHS } from '../lib/layout';
@@ -456,6 +456,37 @@
     }
   }
 
+  // ---- save as web page (SPEC §23) ----
+  let pageBusy = $state(false);
+  async function saveAsPage() {
+    if (!note || pageBusy) return;
+    menuOpen = false;
+    const id = note.id; // the note the action was for, even if another opens meanwhile
+    const ro = readonly;
+    pageBusy = true;
+    try {
+      if (!ro) {
+        await saveNow();
+        const s = existingSaver(id);
+        if (s && (s.dirty || s.conflict || s.status === 'error')) {
+          app.toast('Save your changes first: the page is made from the saved note.', 'error');
+          return;
+        }
+      }
+      if (uploads.tasks.some((t) => t.noteId === id && (t.status === 'uploading' || t.status === 'retrying'))) {
+        app.toast('Wait for the upload to finish: the page includes every file.', 'info');
+        return;
+      }
+      const { bytes: size } = await api.pageSize(id, app.theme);
+      if (size > 100 * 1024 * 1024 && !confirm(`This page will be about ${bytes(size)} because it includes every file. Very large pages can be slow to open, and some tunnels or proxies refuse downloads this big.\n\nDownload it?`)) return;
+      downloadPage(id, app.theme);
+    } catch (e) {
+      app.error(e);
+    } finally {
+      pageBusy = false;
+    }
+  }
+
   async function duplicate() {
     if (!note) return;
     menuOpen = false;
@@ -527,6 +558,7 @@
       if (!editor?.openSectionMenu()) app.toast('Put the cursor in a section first.', 'info');
     };
     const onSave = () => void saveNow();
+    const onSavePage = () => void saveAsPage();
     const onHide = () => {
       if (document.visibilityState === 'hidden') {
         saver?.writeDraft();
@@ -546,6 +578,7 @@
     window.addEventListener('notes:goto-section', onGotoSection);
     window.addEventListener('notes:section-options', onSectionKeys);
     window.addEventListener('notes:save', onSave);
+    window.addEventListener('notes:save-page', onSavePage);
     document.addEventListener('visibilitychange', onHide);
     window.addEventListener('beforeunload', onUnload);
     window.addEventListener('pagehide', onPageHide);
@@ -560,6 +593,7 @@
       window.removeEventListener('notes:section-options', onSectionKeys);
       app.noteSections = [];
       window.removeEventListener('notes:save', onSave);
+      window.removeEventListener('notes:save-page', onSavePage);
       document.removeEventListener('visibilitychange', onHide);
       window.removeEventListener('beforeunload', onUnload);
       window.removeEventListener('pagehide', onPageHide);
@@ -674,6 +708,7 @@
           <Icon name="files" />{#if note.attachments.length}<span class="count-badge" aria-hidden="true">{note.attachments.length}</span>{/if}
         </button>
         {#if readonly}
+          <button class="icon-btn" title="Save as web page" aria-label="Save as web page" disabled={pageBusy} onclick={saveAsPage}><Icon name="page" /></button>
           <button class="btn small" onclick={restore}><Icon name="restore" size={15} /> Restore</button>
           <button class="btn small danger" onclick={purge}><Icon name="trash" size={15} /> Delete forever</button>
         {:else}
@@ -683,6 +718,7 @@
               <button class="menu-scrim" tabindex="-1" aria-hidden="true" onclick={() => (menuOpen = false)}></button>
               <div class="menu menu-right" role="menu" use:menu={{ onclose: () => (menuOpen = false) }}>
                 <button role="menuitem" data-first onclick={duplicate}><Icon name="copy" size={16} /> Duplicate</button>
+                <button role="menuitem" disabled={pageBusy} onclick={saveAsPage}><Icon name="page" size={16} /> Save as web page</button>
                 {#if !app.raw}
                   <button role="menuitem" disabled={!hasTitle} onclick={() => ((menuOpen = false), openSecPop('add', -1, moreBtn))}><Icon name="section" size={16} /> Add section</button>
                   {#if sectionList.length}

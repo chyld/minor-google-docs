@@ -84,6 +84,7 @@ func (s *Server) Routes() http.Handler {
 	api("DELETE /api/attachments/{id}", s.handleDeleteAttachment)
 
 	api("GET /api/export", s.handleExport)
+	api("GET /api/notes/{id}/html", s.handleNotePage)
 	api("GET /api/me/doctor", s.handleDoctorStatus)
 	api("POST /api/me/doctor", s.handleDoctorStart)
 

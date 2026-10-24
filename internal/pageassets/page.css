@@ -1,0 +1,142 @@
+/* "Save as web page" (SPEC §23). Mirrors web/src/app.css: the colour tokens are
+   inserted from Go (internal/core/htmlpage.go) and checked against app.css by
+   TestPageTokensMatchApp; layout values below follow the editor's rules. */
+
+/*TOKENS*/
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: 'Inter Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 16.5px;
+  line-height: 1.7;
+  font-feature-settings: 'cv11', 'ss01';
+}
+.page {
+  max-width: 760px;
+  margin: 24px auto;
+  padding: 28px 40px 40px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+}
+@media (max-width: 640px) {
+  .page { margin: 0; padding: 18px 16px 32px; border: 0; border-radius: 0; box-shadow: none; }
+}
+
+/* tags and dates above the note, like the note view */
+.tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 6px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px; font-size: 13px; line-height: 1.5; font-weight: 550;
+  border-radius: 999px; white-space: nowrap;
+  background: oklch(var(--chip-l) var(--chip-c) var(--h));
+  color: oklch(var(--chip-ink-l) var(--chip-ink-c) var(--h));
+}
+.chip .dot { width: 7px; height: 7px; border-radius: 50%; background: oklch(var(--dot-l) var(--dot-c) var(--h)); }
+.meta { color: var(--muted); font-size: 12.5px; margin: 0 0 4px; }
+.meta .trash { color: var(--danger); font-weight: 600; }
+
+/* the note: plain runs keep every space, tab and blank line exactly as typed */
+.note { overflow-wrap: anywhere; tab-size: 4; }
+.text, .title, .sec-head { white-space: pre-wrap; margin: 0; }
+.title {
+  font-size: 1.75em; font-weight: 760; letter-spacing: -0.025em; line-height: 1.3;
+  padding: 6px 0 10px;
+}
+.sec-head {
+  font-size: 1.2em; font-weight: 680; line-height: 1.35; letter-spacing: -0.01em;
+  padding: 0.85em 0 3px;
+  color: oklch(var(--sec-l) var(--sec-c) var(--h));
+}
+.sec-head.deep { font-weight: 760; color: oklch(var(--sec-deep-l) var(--sec-deep-c) var(--h)); }
+/* the 3px bar: from the line after the heading to the last line with text */
+.sec-body { position: relative; }
+.sec-body::before {
+  content: ''; position: absolute; top: 0; bottom: 0; left: -14px; width: 3px; border-radius: 2px;
+  background: oklch(var(--dot-l) var(--dot-c) var(--h)); opacity: 0.75;
+}
+.hl {
+  background: oklch(var(--hl-l) var(--hl-c) var(--h)); color: var(--hl-ink);
+  border-radius: 3px; padding: 1px 0;
+  -webkit-box-decoration-break: clone; box-decoration-break: clone;
+}
+.hl.hl-deep { background: oklch(var(--hl-deep-l) var(--hl-deep-c) var(--h)); color: var(--hl-deep-ink); }
+
+/* images, as in the editor */
+.img { margin: 0; padding: 10px 0; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.img-frame {
+  display: block; max-width: 100%; border-radius: 12px; overflow: hidden;
+  border: 1px solid var(--border); background: var(--surface-2); box-shadow: var(--shadow);
+}
+.img-frame img { display: block; max-width: 100%; height: auto; max-height: 520px; object-fit: contain; cursor: zoom-in; }
+.img-frame img.full { max-height: none; cursor: zoom-out; }
+.img figcaption { font-size: 12.5px; color: var(--muted); padding-left: 2px; white-space: pre-wrap; }
+.img-missing {
+  padding: 14px 16px; border-radius: 12px; border: 1.5px dashed var(--border-strong);
+  color: var(--muted); font-size: 13px; white-space: pre-wrap;
+}
+
+/* end of the note: three grey dots between two hairlines */
+.note-end { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 18px 0 10px; }
+.note-end svg { fill: var(--muted); opacity: 0.7; flex: none; }
+.end-rule { position: relative; flex: 1; height: 1px; }
+.end-rule::before, .end-rule::after { content: ''; position: absolute; background: var(--muted); }
+.end-rule::before { inset: 0; opacity: 0.35; }
+.end-rule::after { top: -2px; width: 5px; height: 5px; transform: rotate(45deg); opacity: 0.6; }
+.end-rule:first-child::after { left: 0; }
+.end-rule:last-child::after { right: 0; }
+
+.counts { display: flex; gap: 16px; color: var(--muted); font-size: 12.5px; padding: 4px 0 0; }
+
+/* attachments */
+.files { margin-top: 26px; border-top: 1px solid var(--border); padding-top: 14px; }
+.files h2 { font-size: 13px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin: 0 0 8px; }
+.files ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.file {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2);
+}
+.file .thumb { width: 44px; height: 44px; border-radius: 6px; object-fit: cover; flex: none; background: var(--bg-2); }
+.file .kind {
+  flex: none; font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 2px 7px; border-radius: 6px;
+  background: oklch(var(--chip-l) var(--chip-c) var(--h)); color: oklch(var(--chip-ink-l) var(--chip-ink-c) var(--h));
+}
+.file .name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.file .size, .file .note-flag { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+.file button {
+  flex: none; font: inherit; font-size: 13px; font-weight: 600; padding: 5px 12px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--border-strong); background: var(--surface); color: var(--ink);
+}
+.file button:hover { background: var(--surface-hover); }
+.file button:disabled { opacity: 0.6; cursor: progress; }
+.file .missing { color: var(--muted); font-size: 12.5px; }
+.noscript { color: var(--muted); font-size: 12.5px; margin: 10px 0 0; }
+
+@media (forced-colors: active) {
+  .hl, .hl.hl-deep { background: Mark; color: MarkText; }
+  .sec-body::before, .end-rule::before, .end-rule::after { background: GrayText; opacity: 1; }
+  .note-end svg { fill: GrayText; opacity: 1; }
+}
+
+/* paper: always the light colours, nothing interactive, keep the colours that carry meaning */
+@page { margin: 16mm 14mm; }
+@media print {
+  body { background: #fff; font-size: 11.5pt; }
+  /* room on the left for the section bars, which sit 14px outside the text */
+  .page { margin: 0; padding: 0 0 0 16px; max-width: none; border: 0; box-shadow: none; border-radius: 0; background: #fff; }
+  .hl, .chip, .chip .dot, .sec-body::before, .file .kind {
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+  }
+  .title, .sec-head { break-after: avoid; }
+  .img { break-inside: avoid; }
+  .img-frame { box-shadow: none; }
+  .img-frame img, .img-frame img.full { max-height: 90vh; }
+  .file button, .noscript, .counts { display: none; }
+  .file { break-inside: avoid; background: none; }
+}

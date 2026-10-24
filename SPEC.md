@@ -575,6 +575,7 @@ GET    /api/attachments/{id}               download/inline (§7.4)
 PATCH  /api/attachments/{id}               {filename}
 DELETE /api/attachments/{id}
 GET    /api/export                         zip of the current user's data
+GET    /api/notes/{id}/html[?estimate=1&theme=]  one note as a self-contained web page (§23)
 GET    /healthz
 ```
 
@@ -1010,3 +1011,54 @@ A note can be divided into named, coloured sections. Design reviewed by the beta
 Tests: `internal/core` (fixture, titles/previews/search), `web/src/lib/heading.test.ts` (fixture,
 contrast), `web/src/lib/editor/sections.test.ts` (finding, adding, edit rules, moving, collapsing,
 clipboard), `web/e2e/sections.mjs` (browser).
+
+## 23. Save as web page
+
+One note becomes **one self-contained `.html` file** with everything related to it: the text as the
+editor shows it, its images and screenshots in place, and every attached file (PDF, zip, video, …),
+which can be saved back from the page. No size limit. The page needs nothing from the network.
+
+- **Where:** the note's ⋯ menu, a button beside Restore on trashed notes, and the palette ("Save note
+  as web page"). The client remembers which note it was for, saves it first and refuses (with a
+  message) if it still has unsaved changes, a conflict, a save error or an upload in progress. It asks
+  `GET /api/notes/{id}/html?estimate=1` for the size and confirms above 100 MB (about the size, slow
+  to open, tunnels may refuse), then downloads `GET /api/notes/{id}/html?theme=…`.
+- **Server** (`internal/core/htmlpage.go`): `PreparePage` authorizes the note (404 otherwise; trashed
+  allowed) and takes a snapshot first: the text (`note.txt`, LF, valid UTF-8, no NUL; any length of
+  line), tags in the note's order, its ready attachments, and for every image the text shows but the
+  note doesn't have (or whose file is gone) the copy in another note, as the editor does. Size and
+  WriteTo walk the same renderer, so the estimate, `Content-Length` and the bytes written are equal by
+  construction. Files are read with their snapshot sizes; any read or write failure after the
+  headers resets the connection (`http.ErrAbortHandler`), so the browser reports a failed download,
+  never a page that looks complete but isn't. The zip export now does the same.
+- **Requests from other sites** (`Sec-Fetch-Site: cross-site`) are refused for the page and the
+  export, so another site can't make the browser download someone's notes.
+- **Rendering** follows the editor: the title line is the first line that isn't an image and has text
+  once highlights are stripped (JavaScript whitespace rules), shown in full; a title line shaped like a
+  heading is shown as typed and isn't a section. Images above it stay above it. Plain text runs are
+  `pre-wrap` blocks (every space, tab and blank line as typed). Highlights use the app's `.hl` / `--h`
+  colours (`ParseHighlights`, checked against the shared fixture). Section headings show their name in
+  the section colour; the 3px bar runs from the line after the heading to the last line with text (none
+  for an empty section); all sections open. Image lines: this note's copy, else another note's; only
+  png/jpeg/gif/webp are images (`InlineImageTypes`), anything else is "Not an image · name", none is
+  "Image not found · caption". Captions only when there is one. The end mark when the note has text,
+  then the word and character counts, then the attachments (thumbnail only for images the text doesn't
+  show; flags for "not shown in the note" and "from another note"; size; Save).
+- **Bytes:** every file is in the page once. Images up to 2 MB are `data:` URLs (they show even with
+  scripts off); everything else is stored after the script as `<script type="application/octet-stream">`
+  base64 chunks of ≤ 4 MiB, decoded one chunk at a time into a Blob when shown or saved. Save always
+  downloads (`application/octet-stream`, the export's safe file name), never opens a file.
+- **Safety:** every piece of note text is HTML-escaped; no note data is ever in a script, style value,
+  URL or event handler. One constant script (`internal/pageassets/page.js`); the page's CSP (meta tag,
+  and as a header with `sandbox`) is `default-src 'none'; img-src data: blob:; style-src 'unsafe-inline';
+  font-src data:; script-src 'sha256-…'; script-src-attr 'none'; base-uri 'none'; form-action 'none'`,
+  with the hash computed from the script itself. A test asserts exactly one executable script and no
+  event handler attribute. Without scripts the text and small images still show, with a line saying
+  saving files needs JavaScript.
+- **Look:** the app's colour tokens (`PageTokens`, compared with `web/src/app.css` and `colors.ts`
+  by a Go test), the app's Inter font (all its subsets, embedded once, ~290 KB; OFL), light or dark
+  following the app's theme setting (system → the reader's system). Dates are shown in the reader's
+  time zone. Print: light colours always, highlight/chip/bar colours kept, no buttons or counts,
+  headings kept with what follows, images not split.
+- Not carried into the page: raw text view, monospace font, page width (it is always the rendered
+  note in the default column), and folded sections.

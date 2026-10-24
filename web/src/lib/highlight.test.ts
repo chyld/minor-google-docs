@@ -12,6 +12,10 @@ describe('the shared grammar (same fixture as the Go server)', () => {
   for (const c of fixture.strip as { in: string; out: string }[]) {
     it(`strips ${JSON.stringify(c.in)}`, () => expect(stripHighlights(c.in)).toBe(c.out));
   }
+  for (const c of fixture.spans as { in: string; spans: [string, string][] }[]) {
+    it(`finds the highlights in ${JSON.stringify(c.in)}`, () =>
+      expect(parseLine(c.in).map((h) => [c.in.slice(h.innerFrom, h.innerTo), h.name])).toEqual(c.spans));
+  }
 });
 
 describe('writing highlights back', () => {

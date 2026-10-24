@@ -92,11 +92,22 @@ export const api = {
   patchTag: (id: string, patch: { name?: string; color?: string }) => request<Tag>('PATCH', `/api/tags/${id}`, patch),
   deleteTag: (id: string) => request<void>('DELETE', `/api/tags/${id}`),
 
+  pageSize: (id: string, theme: string) => request<{ bytes: number }>('GET', `/api/notes/${id}/html?estimate=1&theme=${encodeURIComponent(theme)}`),
   attachmentMeta: (id: string) => request<Attachment>('GET', `/api/attachments/${id}/meta`),
   byRef: (ref: string) => request<Attachment>('GET', `/api/refs/${ref}`),
   renameAttachment: (id: string, filename: string) => request<Attachment>('PATCH', `/api/attachments/${id}`, { filename }),
   deleteAttachment: (id: string) => request<void>('DELETE', `/api/attachments/${id}`),
 };
+
+/** Starts a download of one note as a self-contained web page (SPEC §23). */
+export function downloadPage(id: string, theme: string) {
+  const a = document.createElement('a');
+  a.href = `/api/notes/${id}/html?theme=${encodeURIComponent(theme)}`;
+  a.download = '';
+  document.body.append(a);
+  a.click();
+  a.remove();
+}
 
 /** Starts a download of the signed-in user's export zip (one folder per note). */
 export function downloadExport() {

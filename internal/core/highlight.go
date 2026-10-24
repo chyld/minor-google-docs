@@ -47,3 +47,23 @@ func StripHighlights(s string) string {
 // SearchText is what the search index and snippets see: no image markers, no highlight
 // delimiters, no section markup (the section names stay).
 func SearchText(body string) string { return StripSections(StripHighlights(StripMarkers(body))) }
+
+// HighlightSpan is one highlight on a line: [From, To) is the whole =={name}text==,
+// [TextFrom, TextTo) the coloured text (byte offsets).
+type HighlightSpan struct {
+	From, To, TextFrom, TextTo int
+	Name                       string
+}
+
+// ParseHighlights returns every highlight on one line, in order, with the same rules as
+// the editor's parseLine (web/src/lib/highlight.ts): none on image or section lines.
+func ParseHighlights(line string) []HighlightSpan {
+	if !strings.Contains(line, "=={") || IsMarker(line) || IsSection(line) {
+		return nil
+	}
+	var out []HighlightSpan
+	for _, m := range highlightRe.FindAllStringSubmatchIndex(line, -1) {
+		out = append(out, HighlightSpan{From: m[0], To: m[1], TextFrom: m[4], TextTo: m[5], Name: line[m[2]:m[3]]})
+	}
+	return out
+}

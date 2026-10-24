@@ -480,12 +480,59 @@ func (s *Server) handleDeleteAttachment(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// crossSite reports a request started by another site (a link or form elsewhere):
+// downloads of a user's data must come from the app itself.
+func crossSite(w http.ResponseWriter, r *http.Request) bool {
+	if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+		writeErr(w, http.StatusForbidden, "cross_site", "open this from the app")
+		return true
+	}
+	return false
+}
+
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
+	if crossSite(w, r) {
+		return
+	}
 	sess := sessionFrom(r)
 	name := fmt.Sprintf("notes-%s-%s.zip", sess.User.Username, time.Now().Format("2006-01-02"))
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", contentDisposition("attachment", name))
 	if err := s.store.Export(r.Context(), sess.User.ID, slidingWrites(w)); err != nil {
+		// the zip is incomplete: reset the connection so the browser reports a failed
+		// download instead of saving a truncated file as if it were whole
 		s.log.Error("export failed mid-stream", "err", err)
+		panic(http.ErrAbortHandler)
+	}
+}
+
+// handleNotePage serves a note as one self-contained web page (SPEC §23), or with
+// ?estimate=1 its exact size.
+func (s *Server) handleNotePage(w http.ResponseWriter, r *http.Request) {
+	if crossSite(w, r) {
+		return
+	}
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	p, err := s.store.PreparePage(r.Context(), uid(r), id, r.URL.Query().Get("theme"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if r.URL.Query().Get("estimate") == "1" {
+		writeJSON(w, http.StatusOK, map[string]int64{"bytes": p.Size()})
+		return
+	}
+	h := w.Header()
+	h.Set("Content-Type", "text/html; charset=utf-8")
+	h.Set("Content-Disposition", contentDisposition("attachment", p.Filename()))
+	h.Set("Content-Length", strconv.FormatInt(p.Size(), 10))
+	h.Set("Content-Security-Policy", core.PageCSP()+"; sandbox") // replaces the app's policy
+	h.Set("Cache-Control", "no-store")
+	if _, err := p.WriteTo(slidingWrites(w)); err != nil {
+		s.log.Error("web page failed mid-stream", "note", id, "err", err)
+		panic(http.ErrAbortHandler) // never a page that looks complete but isn't
 	}
 }

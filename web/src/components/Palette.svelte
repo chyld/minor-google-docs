@@ -40,6 +40,7 @@
       : []),
     { kind: 'action', id: 'account', label: 'Account & data', icon: 'user', run: () => (app.accountOpen = true) },
     { kind: 'action', id: 'export', label: 'Export my notes', icon: 'download', run: downloadExport },
+    ...(app.selectedId ? ([{ kind: 'action', id: 'save-page', label: 'Save note as web page', icon: 'page', run: () => window.dispatchEvent(new CustomEvent('notes:save-page')) }] as Item[]) : []),
     { kind: 'action', id: 'doctor', label: 'Check my notes', icon: 'check', run: () => ((app.checkOnOpen = true), (app.accountOpen = true)) },
     { kind: 'action', id: 'keys', label: 'Keyboard shortcuts', icon: 'keyboard', hint: '?', run: () => (app.shortcutsOpen = true) },
     {

@@ -87,6 +87,10 @@ anything and leave files younger than 10 minutes alone), but for a big repair,
 
 Users can also export their own data from **Account & data** in the app.
 
+A single note can be saved as one self-contained web page (⋯ → **Save as web page**): its text,
+sections, highlights and images as in the app, plus every attached file, which can be saved back
+from the page. It opens offline in any browser and prints cleanly.
+
 ### Restore
 
 A restore **replaces** the data folder. Restore into a fresh one:

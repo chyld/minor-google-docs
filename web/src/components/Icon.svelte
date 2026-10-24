@@ -13,6 +13,7 @@
     files: 'M8 4h6l4 4v10a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1zM4 8v12a1 1 0 0 0 1 1h9',
     image: 'M4 5h16v14H4zM4 16l5-5 5 5M13 14l2-2 5 5M15 9h.01',
     download: 'M12 4v11M7 10l5 5 5-5M5 20h14',
+    page: 'M7 3h7l5 5v13H7zM14 3v5h5M9.5 13h7M9.5 16.5h5',
     x: 'M6 6l12 12M18 6L6 18',
     more: 'M5 12h.01M12 12h.01M19 12h.01',
     copy: 'M9 9h10v10H9zM5 15V5h10',
