@@ -728,7 +728,9 @@
         {#if note && hasText}
           <!-- end of the note: drawn, never part of the text -->
           <div class="note-end" aria-hidden="true">
+            <span class="end-rule"></span>
             <svg width="24" height="20" viewBox="0 0 24 20"><circle cx="12" cy="4.5" r="2.6" /><circle cx="5.5" cy="15" r="2.6" /><circle cx="18.5" cy="15" r="2.6" /></svg>
+            <span class="end-rule"></span>
           </div>
         {/if}
       </div>

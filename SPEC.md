@@ -710,12 +710,13 @@ layouts, attachments, clipboard, counts, undo, focus, trashed notes, phone toolb
 ## 21. End of note
 
 A small asterism (`⁂`, three dots in a triangle, an inline SVG so it looks the same on every device)
-is drawn centred under the last line of every note with text, so it's clear nothing more follows, for example after a final image or
+is drawn centred under the last line of every note with text, with a faded hairline either side running
+out to the edges of the text column, each ending in a small diamond, so it's clear nothing more follows, for example after a final image or
 blank lines.
 
 - **Not text.** It sits outside the editor (`.note-end` in `NoteView.svelte`), is `aria-hidden`, and can't
   be selected, copied, searched or saved.
-- **Colour.** Neutral grey (`--muted`, faded) in both themes, whatever the note's tags, so it never
+- **Colour.** Neutral grey (`--muted`, faded; the hairlines fainter than the dots) in both themes, whatever the note's tags, so it never
   competes with section or tag colours. Full-strength `GrayText` in forced-colours mode.
 - **Click.** A plain left click (or tap) on it, or on the empty space under the note in line with the
   text (anywhere down to the bottom of the scroll area, not the side margins), puts the cursor at the

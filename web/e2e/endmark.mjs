@@ -27,6 +27,17 @@ check('it is three faded grey dots', await page.evaluate((m) => {
   return document.querySelectorAll(`${m} circle`).length === 3 && s.fill !== 'none' && Number(s.opacity) < 1 && !!muted;
 }, mark));
 
+check('a faded hairline either side, each ending in a small diamond', await page.evaluate((m) => {
+  const rules = [...document.querySelectorAll(`${m} .end-rule`)];
+  const dots = document.querySelector(`${m} svg`).getBoundingClientRect();
+  const host = document.querySelector('.editor-host').getBoundingClientRect();
+  const [a, b] = rules.map((r) => r.getBoundingClientRect());
+  const cap = (r) => getComputedStyle(r, '::after');
+  return rules.length === 2 && a.right <= dots.left && b.left >= dots.right && a.width > 100 && Math.abs(a.width - b.width) < 2 &&
+    a.left >= host.left - 1 && b.right <= host.right + 1 && Number(getComputedStyle(rules[0], '::before').opacity) < 1 &&
+    rules.every((r) => cap(r).width === '5px' && cap(r).transform !== 'none');
+}, mark));
+
 await page.evaluate(() => __v.focus());
 await page.keyboard.press('Control+a');
 await page.keyboard.press('Control+c');
