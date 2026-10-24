@@ -23,7 +23,6 @@ type RebuildReport struct {
 	Warnings []string
 }
 
-
 // RebuildDB recreates users, tags, notes and images from the data folder
 // (user.json, meta.json, note.txt, files/) into an empty database (SPEC §3.4).
 // Nothing in the files is trusted as a path: ids must match folder names,
