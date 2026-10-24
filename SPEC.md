@@ -487,8 +487,8 @@ secure when the request arrived over TLS or via trusted proxy with `proto=https`
   metadata DB, no write lock) and that `data/tmp` is writable (a tiny temp file is created and
   removed) — a read-only or full volume makes it 503, which is the point: the app can't save.
 - Restore: stop, put `data/` back (or untar backup), delete `search.sqlite`, start (reindexes; an
-  old-layout backup is converted, §3.3). Lost only the database: start once (it sees an empty
-  database over converted folders), stop, run `notes rebuild-db`, set passwords, start.
+  old-layout backup is converted, §3.3). Lost only the database: with the server stopped, move `db/`
+  aside, run `notes rebuild-db` (it opens a new, empty database itself), set passwords, start.
 
 ### 9.2 Check my notes (per-user doctor)
 

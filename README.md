@@ -49,7 +49,7 @@ brings it back; passwords and sessions live only in the database.
 
 Upgrading from a version that kept all notes in one folder: the first start converts the data
 folder (after writing `data/backups/pre-layout-v2-*.tar.gz`). For a big folder you can run
-`docker compose run --rm notes notes migrate-layout` first.
+`docker compose run --rm notes migrate-layout` first.
 
 ## Command line
 
@@ -103,6 +103,29 @@ host user *is* `PUID`, you can drop it.
 
 The backup holds `db/notes.sqlite` (a consistent snapshot) and `users/`. Leftover `-wal`/`-shm`
 files from a live database never end up in it.
+
+### If only the database is lost
+
+Every note's folder mirrors its details (`meta.json`) and every user's folder its account
+(`user.json`), so `notes rebuild-db` can rebuild a lost or broken `db/notes.sqlite` from `users/`:
+
+```sh
+docker compose down
+sudo mv data/db data/db.broken                     # keep it until you're happy
+docker compose run --rm notes rebuild-db           # lists the users it restored
+docker compose run --rm notes user passwd alice   # once per user listed
+docker compose up -d
+```
+
+What comes back: users (and whether they're disabled), every note with its text, title, pin,
+trash state and dates, tags with their colours, images and attachments with their original
+names, and search. What doesn't: **passwords** (never stored in the note folders, so set them
+again as above), sign-in sessions, the audit log, and tags that aren't on any note.
+
+`rebuild-db` only fills an empty database; it refuses if one with users or notes is there. It
+trusts nothing in the folders as a path. If you only have `.txt` files (no note folders), use
+`notes import` instead. A full `notes backup` is still the better safety net: it also keeps
+passwords and the audit log.
 
 ### Moving notes between accounts or servers
 
