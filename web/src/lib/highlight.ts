@@ -16,7 +16,39 @@ export const hlLabel = (name: string) => {
   const base = name.replace(/-deep$/, '');
   return base[0].toUpperCase() + base.slice(1) + (hlDeep(name) ? ', strong' : '');
 };
-export const isHlName = (s: string) => NAME_SET.has(s);
+export const isHlName = (s: string) => NAME_SET.has(s); // a colour (sections, swatches, the last colour)
+
+// ---- styles: a highlight's name is a style set (SPEC §19) ----
+// An optional colour, then "b" (bold), then "u" (underline), joined by "+": "coral", "b", "coral+b+u".
+// 99 names, in this order (internal/core/highlight.go generates the same list).
+
+export interface Style {
+  color: string | null;
+  b: boolean;
+  u: boolean;
+}
+
+export const HL_STYLE_NAMES: string[] = [...HL_NAMES.flatMap((c) => [c, `${c}+b`, `${c}+u`, `${c}+b+u`]), 'b', 'u', 'b+u'];
+const STYLE_SET = new Set(HL_STYLE_NAMES);
+export const isStyleName = (s: string) => STYLE_SET.has(s);
+export const NO_STYLE: Style = { color: null, b: false, u: false };
+
+/** The parts of a style name (null or an unknown name: no style). */
+export function parseStyle(name: string | null): Style {
+  if (!name || !STYLE_SET.has(name)) return NO_STYLE;
+  const parts = name.split('+');
+  let i = 0;
+  const color = NAME_SET.has(parts[0]) ? parts[i++] : null;
+  const b = parts[i] === 'b' ? (i++, true) : false;
+  const u = parts[i] === 'u';
+  return { color, b, u };
+}
+
+/** The canonical name of a style, or null for no style at all. */
+export function styleName(s: Style): string | null {
+  const parts = [s.color, s.b ? 'b' : null, s.u ? 'u' : null].filter(Boolean);
+  return parts.length ? parts.join('+') : null;
+}
 
 // Grammar: ==\{(name)\}([^\n]+?)== — a known name, at least one character, ending at the first "=="
 // after it, never across lines. Parsed by hand in linear time (a regex with a lazy body rescans the
@@ -44,7 +76,7 @@ export function parseLine(text: string, base = 0): Hl[] {
   for (let i = text.indexOf('=={'); i >= 0 && i < n; ) {
     const close = text.indexOf('}', i + 3);
     const name = close < 0 ? '' : text.slice(i + 3, close);
-    const end = close >= 0 && NAME_SET.has(name) && close + 2 <= n ? nextEq[close + 2] : -1;
+    const end = close >= 0 && STYLE_SET.has(name) && close + 2 <= n ? nextEq[close + 2] : -1;
     if (end < 0) {
       i = text.indexOf('=={', i + 1);
       continue;
@@ -174,20 +206,26 @@ export function serialize(plain: string, colors: (string | null)[]): { text: str
   return { text: out, before, after };
 }
 
-/** One line with plain offsets [ps, pe) set to `name` (null removes colour). With trim, the
+/** One line with plain offsets [ps, pe) set to `name` (null removes it). With trim, the
  * range shrinks to its non-whitespace extent first. Returns null if the range is empty after trim. */
 export function recolor(runs: Runs, ps: number, pe: number, name: string | null, trim = true) {
+  return restyle(runs, ps, pe, () => parseStyle(name), trim && !!name);
+}
+
+/** One line with every character in plain offsets [ps, pe) restyled by fn (always written back as a
+ * canonical name). With trim (used when adding a style), the range first shrinks to its
+ * non-whitespace extent; a surrogate pair (an emoji) is never split. Null if nothing is left. */
+export function restyle(runs: Runs, ps: number, pe: number, fn: (s: Style) => Style, trim: boolean) {
   const { plain } = runs;
-  if (trim && name) {
+  if (trim) {
     while (ps < pe && /\s/.test(plain[ps])) ps++;
     while (pe > ps && /\s/.test(plain[pe - 1])) pe--;
   }
-  // never split a surrogate pair (an emoji)
   if (ps > 0 && /[\udc00-\udfff]/.test(plain[ps] ?? '')) ps--;
   if (pe < plain.length && /[\ud800-\udbff]/.test(plain[pe - 1] ?? '')) pe++;
   if (ps >= pe) return null;
   const colors = runs.colors.slice();
-  for (let i = ps; i < pe; i++) colors[i] = name;
+  for (let i = ps; i < pe; i++) colors[i] = styleName(fn(parseStyle(colors[i])));
   const out = writeLine(plain, colors);
   return out && { ...out, ps, pe };
 }

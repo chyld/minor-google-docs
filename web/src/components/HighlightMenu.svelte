@@ -2,6 +2,16 @@
   import { untrack } from 'svelte';
   import { HL_HUES, hlHue, hlLabel } from '../lib/highlight';
   import Icon from './Icon.svelte';
+  import type { Coverage, StyleOp } from '../lib/editor/highlights';
+
+  /** Bold / underline / clear for note text (never for section colours). */
+  interface Formatting {
+    bold: Coverage;
+    underline: Coverage;
+    hasColor: boolean;
+    styled: boolean;
+    onformat: (op: StyleOp) => void;
+  }
 
   interface Props {
     current: string | null; // the highlight the selection is in
@@ -11,8 +21,10 @@
     class?: string;
     label?: string; // what the colours are for
     removeLabel?: string;
+    formatting?: Formatting;
   }
-  let { current, last, onpick, onclose, class: cls = '', label = 'Highlight colours', removeLabel = 'Remove highlight' }: Props = $props();
+  let { current, last, onpick, onclose, class: cls = '', label = 'Highlight colours', removeLabel = 'Remove highlight', formatting }: Props = $props();
+  const pressed = (c: Coverage) => (c === 'all' ? 'true' : c === 'some' ? 'mixed' : 'false');
 
   // light colours, then strong ones; 12 per row (6 on phones, where each row wraps in two)
   const names = [...HL_HUES, ...HL_HUES.map((h) => `${h}-deep`)];
@@ -52,7 +64,19 @@
 <!-- mousedown is prevented so the editor keeps its selection while the menu is used -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="hl-menu {cls}" onmousedown={(e) => e.preventDefault()} onkeydown={onRootKey}>
-  {#if current}
+  {#if formatting}
+    <!-- bold, underline and clear sit beside the remove button; the swatch grid below is unchanged -->
+    <div class="hl-format" role="toolbar" aria-label="Text formatting">
+      <button class="hl-fmt fmt-btn-b" title="Bold (Ctrl+B)" aria-label="Bold" aria-pressed={pressed(formatting.bold)} onclick={() => formatting.onformat({ kind: 'toggle', style: 'b' })}><b>B</b></button>
+      <button class="hl-fmt fmt-btn-u" title="Underline (Ctrl+U)" aria-label="Underline" aria-pressed={pressed(formatting.underline)} onclick={() => formatting.onformat({ kind: 'toggle', style: 'u' })}><u>U</u></button>
+      {#if formatting.styled}
+        <button class="hl-remove" onclick={() => formatting.onformat({ kind: 'clear' })}><Icon name="x" size={14} /> Clear formatting</button>
+      {/if}
+    </div>
+    {#if formatting.hasColor}
+      <button class="hl-remove" onclick={() => onpick(null)}><Icon name="x" size={14} /> Remove colour</button>
+    {/if}
+  {:else if current}
     <button class="hl-remove" onclick={() => onpick(null)}><Icon name="x" size={14} /> {removeLabel}</button>
   {/if}
   <div class="hl-grid" role="grid" aria-label={label} tabindex="-1" bind:this={grid} {onkeydown}>

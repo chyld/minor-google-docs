@@ -259,7 +259,13 @@ func TestHighlightFixtures(t *testing.T) {
 		t.Fatal(err)
 	}
 	var fx struct {
-		Names []string
+		Names  []string
+		Styles []string
+		Parse  []struct {
+			Name  string
+			Color *string
+			B, U  bool
+		}
 		Strip []struct{ In, Out string }
 	}
 	if err := json.Unmarshal(raw, &fx); err != nil {
@@ -267,6 +273,18 @@ func TestHighlightFixtures(t *testing.T) {
 	}
 	if strings.Join(fx.Names, ",") != strings.Join(HighlightNames, ",") {
 		t.Fatalf("names differ from the shared fixture: %v", HighlightNames)
+	}
+	if len(fx.Styles) != 99 || strings.Join(fx.Styles, ",") != strings.Join(HighlightStyleNames, ",") {
+		t.Fatalf("style names differ from the shared fixture (%d)", len(HighlightStyleNames))
+	}
+	for _, c := range fx.Parse {
+		want := Style{B: c.B, U: c.U}
+		if c.Color != nil {
+			want.Color = *c.Color
+		}
+		if got := ParseStyle(c.Name); got != want || StyleName(got) != c.Name {
+			t.Errorf("ParseStyle(%q) = %+v (%q)", c.Name, got, StyleName(got))
+		}
 	}
 	for _, c := range fx.Strip {
 		if got := StripHighlights(c.In); got != c.Out {

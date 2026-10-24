@@ -10,7 +10,7 @@
   import { type SectionInfo, foldedSections, gotoSection, insertSection, isFolded, moveSection, recolorSection, removeSection, restoreFolds, sectionAt, sections, sectionsOf, setFolded } from '../lib/editor/sections';
   import { isHeadingLine } from '../lib/heading';
   import { imageEditing, imageLineRange, imageOp, initialSelection, isImageLine, selectedImage, textPos } from '../lib/editor/images';
-  import { applyHighlight, highlightAt, highlights, type HighlightInfo } from '../lib/editor/highlights';
+  import { applyHighlight, applyStyle, highlightAt, highlights, styleState, type HighlightInfo, type StyleOp } from '../lib/editor/highlights';
   import { stamp } from '../lib/format';
   import { MARKER_RE, markerLine } from '../lib/ids';
 
@@ -70,7 +70,15 @@
     return [
       history(),
       search({ top: true }),
-      Prec.highest(keymap.of([{ key: 'Mod-Shift-h', preventDefault: true, run: () => (onhighlightkey?.(), true) }])),
+      Prec.highest(
+        keymap.of([
+          { key: 'Mod-Shift-h', preventDefault: true, run: () => (onhighlightkey?.(), true) },
+          // bold / underline (SPEC §19): always swallowed in the editor, so the browser's own
+          // Ctrl+B (bookmarks) / Ctrl+U (view source) never fire; nothing to do in raw or read-only
+          { key: 'Mod-b', preventDefault: true, run: (v) => (v.composing ? false : (formatKey(v, 'b'), true)) },
+          { key: 'Mod-u', preventDefault: true, run: (v) => (v.composing ? false : (formatKey(v, 'u'), true)) },
+        ]),
+      ),
       rich.of(richExtensions()),
       drawSelection({ drawRangeCursor: false }),
       EditorView.lineWrapping,
@@ -180,8 +188,17 @@
     reportSections();
   }
 
+  function formatKey(v: EditorView, style: 'b' | 'u') {
+    if (untrack(() => raw) || v.state.readOnly || selectedImage(v.state)) return;
+    applyStyle(v, { kind: 'toggle', style });
+  }
+
+  // the bold/underline state is exact for selections up to this size (computing it for a whole
+  // large note on every cursor move would be slow); beyond it the buttons show "some"
+  const STATE_LIMIT = 50_000;
+
   function highlightInfo(): HighlightInfo {
-    const none: HighlightInfo = { can: false, empty: true, current: null, focused: false, dragging, rect: null };
+    const none: HighlightInfo = { can: false, empty: true, current: null, focused: false, dragging, rect: null, bold: 'none', underline: 'none', hasColor: false, styled: false };
     if (!view) return none;
     const st = view.state;
     const focused = view.hasFocus;
@@ -193,10 +210,12 @@
       pos = l.to + 1;
     }
     const h = highlightAt(st);
-    const current = h && r.from >= h.from && r.to <= h.to ? h.name : null;
-    if (r.empty) return { ...none, can: !!h, current, focused };
+    const big = r.to - r.from > STATE_LIMIT;
+    const ss = big ? { bold: 'some' as const, underline: 'some' as const, hasColor: true, styled: true, color: null } : styleState(st);
+    const styles = { bold: ss.bold, underline: ss.underline, hasColor: ss.hasColor, styled: ss.styled, current: ss.color };
+    if (r.empty) return { ...none, ...styles, can: !!h, focused };
     const c = view.coordsAtPos(r.from, 1);
-    return { can: true, empty: false, current, focused, dragging, rect: c ? { left: c.left, top: c.top, bottom: c.bottom } : null };
+    return { ...styles, can: true, empty: false, focused, dragging, rect: c ? { left: c.left, top: c.top, bottom: c.bottom } : null };
   }
 
   // ---- sections ----
@@ -275,11 +294,20 @@
     onselection?.(highlightInfo());
   }
 
-  /** Colour the selection (null removes highlighting), then return to typing. */
+  /** Colour the selection (null removes the colour; bold and underline stay), then return to typing. */
   export function highlight(name: string | null): boolean {
     if (!view) return false;
     const done = applyHighlight(view, name);
     view.focus();
+    return done;
+  }
+
+  /** Toggle bold/underline or clear all formatting on the selection, then return to typing. */
+  export function format(op: StyleOp, focus = true): boolean {
+    if (!view || untrack(() => raw) || view.state.readOnly) return false;
+    const done = applyStyle(view, op);
+    if (focus) view.focus();
+    report();
     return done;
   }
 

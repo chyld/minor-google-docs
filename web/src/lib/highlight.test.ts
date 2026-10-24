@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import fixtureText from '../../../internal/core/testdata/highlights.json?raw';
 import css from '../app.css?raw';
-import { HL_NAMES, lineRuns, parseLine, pieces, recolor, serialize, stripHighlights } from './highlight';
+import { HL_NAMES, HL_STYLE_NAMES, lineRuns, parseLine, parseStyle, pieces, recolor, serialize, styleName, stripHighlights } from './highlight';
 
 const fixture = JSON.parse(fixtureText);
 
@@ -11,6 +11,15 @@ describe('the shared grammar (same fixture as the Go server)', () => {
   });
   for (const c of fixture.strip as { in: string; out: string }[]) {
     it(`strips ${JSON.stringify(c.in)}`, () => expect(stripHighlights(c.in)).toBe(c.out));
+  }
+  it('has the same 99 style names, in the same order', () => {
+    expect(HL_STYLE_NAMES).toEqual(fixture.styles);
+  });
+  for (const c of fixture.parse as { name: string; color: string | null; b: boolean; u: boolean }[]) {
+    it(`reads the style ${c.name}`, () => {
+      expect(parseStyle(c.name)).toEqual({ color: c.color, b: c.b, u: c.u });
+      expect(styleName(parseStyle(c.name))).toBe(c.name);
+    });
   }
   for (const c of fixture.spans as { in: string; spans: [string, string][] }[]) {
     it(`finds the highlights in ${JSON.stringify(c.in)}`, () =>
@@ -38,7 +47,7 @@ describe('writing highlights back', () => {
     const rnd = (n: number) => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) % n);
     for (let k = 0; k < 2000; k++) {
       const plain = Array.from({ length: 1 + rnd(12) }, () => chars[rnd(chars.length)]).join('');
-      const colors = Array.from(plain, () => (rnd(3) ? null : HL_NAMES[rnd(4)]));
+      const colors = Array.from(plain, () => (rnd(3) ? null : HL_STYLE_NAMES[rnd(HL_STYLE_NAMES.length)]));
       const out = serialize(plain, colors).text;
       expect(stripHighlights(out)).toBe(plain);
       const runs = lineRuns(out);

@@ -789,9 +789,15 @@ Tests: `web/src/lib/layout.test.ts`, `web/e2e/panels.mjs`.
 Stored in the note text, so they survive export/backup/conflicts and can't drift:
 `=={name}highlighted words==`. Grammar (single line, one definition in `web/src/lib/highlight.ts` and
 `internal/core/highlight.go`, both tested against `internal/core/testdata/highlights.json`):
-`==\{(<name>)\}([^\n]+?)==` with names longest-first. 24 names: the 12 tag hues (`coral` … `pink`),
-each plain (light tint) and `-deep` (strong). Unknown names, `a == b`, unterminated or multi-line text
-stay plain. Image lines are never highlights. No escapes. The TS parser is hand-written and linear
+`==\{(<name>)\}([^\n]+?)==` with names longest-first (each quoted in the Go regexp). A name is a
+**style set**: an optional colour, then `b` (bold), then `u` (underline), joined by `+` in that order —
+`coral`, `b`, `u`, `b+u`, `coral+b`, `sky-deep+b+u`. The 24 colours are the 12 tag hues (`coral` …
+`pink`), each plain (light tint) and `-deep` (strong); with the style flags that makes 99 names, in a
+fixed order shared by both languages (per colour: `c`, `c+b`, `c+u`, `c+b+u`; then `b`, `u`, `b+u`).
+Colours and style names are separate lists: sections, the swatches and the remembered last colour
+only ever use the 24 colours (`## {b} x` is not a section). Unknown names (`=={u+b}`, `=={bu}`,
+`=={bold}`), `a == b`, unterminated or multi-line text stay plain. A note that already contained one
+of the new names literally (e.g. text about this syntax) is read as formatted since this version. Image lines are never highlights. No escapes. The TS parser is hand-written and linear
 (a lazy regex rescans the line for every unclosed opener); Go's RE2 is linear too. No length cap.
 
 - **Writing.** A highlight's text never contains `==` (it would end early), never ends with `=` and is
@@ -819,10 +825,25 @@ stay plain. Image lines are never highlights. No escapes. The TS parser is hand-
   touching same-colour runs merge; idempotent. With just a cursor in a highlight's text (not merely
   next to it): recolour/remove it.
   Image lines, blank lines and read-only notes are skipped. Afterwards the coloured text is selected.
+- **Bold and underline** (`applyStyle`, one undo step): **toggle** — decided once for the whole
+  selection over its visible characters (images and headings skipped): if all have it, it comes off
+  everywhere, otherwise it goes on everywhere; trimmed to the non-whitespace extent when adding, never
+  when removing; emoji never split. **Colour** changes only the colour of each character (bold and
+  underline stay; "Remove colour" keeps them too). **Clear formatting** removes colour, bold and
+  underline. A cursor in a span's text acts on that whole span; in plain text nothing happens (there is
+  no "bold the next characters"). Drawn with `.fmt-b` (700) / `.fmt-u` (underline, from-font thickness);
+  the tint (`.hl`, `--h`) only when there is a colour; in the title line bold keeps the title's 760.
+  Ctrl+B / Ctrl+U (Cmd on a Mac) toggle; they are always swallowed by the editor (so Firefox's bookmarks
+  sidebar and view-source never open), do nothing in raw view, read-only notes, on images and headings,
+  and wait while an input method is composing. Palette: Bold, Underline, Clear formatting.
 - **UI.** Note-bar highlighter button (enabled with a selection or a cursor in a highlight) opens a
-  12×2 grid (6 columns on phones, pinned to the bottom); "Remove highlight" first when inside one.
+  12×2 grid (6 columns on phones, pinned to the bottom) with Bold, Underline (pressed: on / mixed / off)
+  and Clear formatting above it, and "Remove colour" when the selection has one; these toggles keep the
+  menu open, colours close it. The section colour pickers use the same grid without the formatting row.
   Desktop also gets a small bar above a selection (fixed position, kept inside the note's scroll area,
-  below the selection near the top; its menu kept inside the window): last colour, colours, remove.
+  below the selection near the top; its menu kept inside the window): Bold, Underline, last colour,
+  colours, Remove colour, Clear formatting. The bold/underline state is exact for selections up to
+  50,000 characters (beyond that the buttons show "mixed").
   Arrow keys follow the visible columns. Ctrl+Shift+H opens the
   grid; arrows move, Enter applies, Esc returns to the editor. The grid starts on the current or last
   colour, so Ctrl+Shift+H, Enter repeats it. Menus keep the editor's selection (mousedown prevented).

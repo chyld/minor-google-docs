@@ -66,6 +66,9 @@ body {
   -webkit-box-decoration-break: clone; box-decoration-break: clone;
 }
 .hl.hl-deep { background: oklch(var(--hl-deep-l) var(--hl-deep-c) var(--h)); color: var(--hl-deep-ink); }
+.fmt-b { font-weight: 700; }
+.fmt-u { text-decoration: underline; text-decoration-thickness: from-font; text-underline-offset: 0.15em; }
+.title .fmt-b { font-weight: inherit; }
 
 /* images, as in the editor */
 .img { margin: 0; padding: 10px 0; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }

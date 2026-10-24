@@ -13,13 +13,14 @@ import {
   Transaction,
   type ChangeSpec,
   type Extension,
+  type Line,
   type Range,
   type Text,
   type TransactionSpec,
 } from '@codemirror/state';
 import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import { isolateHistory } from '@codemirror/commands';
-import { hlDeep, hlHue, lineRuns, parseLine, recolor, serialize, stripHighlights, writeLine, type Hl } from '../highlight';
+import { hlDeep, hlHue, lineRuns, parseLine, parseStyle, restyle, serialize, stripHighlights, writeLine, type Hl, type Style } from '../highlight';
 import { MARKER_RE } from '../ids';
 import { headingSlice, isHeadingLine, stripSections } from '../heading';
 import { imageOp, isImageLine } from './images';
@@ -101,7 +102,12 @@ const markCache = new Map<string, Decoration>();
 const markFor = (name: string) => {
   let d = markCache.get(name);
   if (!d) {
-    d = Decoration.mark({ class: hlDeep(name) ? 'hl hl-deep' : 'hl', attributes: { style: `--h:${hlHue(name)}`, 'data-hl': name } });
+    // the tint only with a colour; bold and underline on their own
+    const st = parseStyle(name);
+    const cls = [st.color ? (hlDeep(st.color) ? 'hl hl-deep' : 'hl') : '', st.b ? 'fmt-b' : '', st.u ? 'fmt-u' : ''].filter(Boolean).join(' ');
+    const attributes: Record<string, string> = { 'data-hl': name };
+    if (st.color) attributes.style = `--h:${hlHue(st.color)}`;
+    d = Decoration.mark({ class: cls, attributes });
     markCache.set(name, d);
   }
   return d;
@@ -473,59 +479,131 @@ const rawOnCopy = ViewPlugin.define((view) => {
 export interface HighlightInfo {
   can: boolean; // a highlight can be applied/changed here
   empty: boolean; // just a cursor (inside a highlight)
-  current: string | null; // the highlight the selection is in
+  current: string | null; // the colour, if the whole selection has one and the same colour
   focused: boolean;
   dragging: boolean;
   rect: { left: number; top: number; bottom: number } | null;
+  bold: Coverage;
+  underline: Coverage;
+  hasColor: boolean; // some selected character has a colour
+  styled: boolean; // some selected character has a colour, bold or underline
 }
 
-// ---- applying and removing ----
+export type Coverage = 'all' | 'some' | 'none';
 
-/**
- * Colour the main selection with `name` (null removes highlighting). Each text line in the
- * selection is handled on its own (highlights never span lines); image lines are skipped.
- * With only a cursor, it recolours/removes the highlight the cursor is in.
- * One undo step; returns false if there was nothing to do.
- */
-export function applyHighlight(view: Pick<EditorView, 'state' | 'dispatch'>, name: string | null): boolean {
-  const { state } = view;
-  if (state.readOnly) return false;
+// ---- the selection's styles ----
+
+/** The ranges a style edit touches: per text line (images and section headings skipped), as plain
+ * offsets. With just a cursor, the whole text of the highlight it is in (untrimmed). */
+function targets(state: EditorState): { line: Line; runs: ReturnType<typeof lineRuns>; ps: number; pe: number; cursor: boolean }[] {
   let { from, to } = state.selection.main;
+  let cursor = false;
   if (from === to) {
     const h = highlightAt(state);
-    if (!h) return false;
+    if (!h) return [];
     from = h.innerFrom;
     to = h.innerTo;
+    cursor = true;
   }
-  const doc = state.doc;
+  const out = [];
+  for (let pos = from; pos <= to; ) {
+    const line = state.doc.lineAt(pos);
+    const a = Math.max(from, line.from) - line.from;
+    const b = Math.min(to, line.to) - line.from;
+    pos = line.to + 1;
+    if (isImageLine(line) || isHeadingLine(line.text) || a >= b) continue;
+    const runs = lineRuns(line.text);
+    out.push({ line, runs, ps: runs.toPlain(a), pe: runs.toPlain(b), cursor });
+  }
+  return out;
+}
+
+/** Bold / underline / colour over the selection's visible (non-whitespace) characters. */
+export function styleState(state: EditorState): { bold: Coverage; underline: Coverage; hasColor: boolean; styled: boolean; color: string | null; any: boolean } {
+  let n = 0;
+  let nb = 0;
+  let nu = 0;
+  let colored = 0;
+  let styled = 0;
+  const colors = new Set<string | null>();
+  for (const t of targets(state)) {
+    for (let i = t.ps; i < t.pe; i++) {
+      if (/\s/.test(t.runs.plain[i])) continue;
+      const st = parseStyle(t.runs.colors[i]);
+      n++;
+      if (st.b) nb++;
+      if (st.u) nu++;
+      if (st.color) colored++;
+      if (st.color || st.b || st.u) styled++;
+      colors.add(st.color);
+    }
+  }
+  const cov = (k: number): Coverage => (n && k === n ? 'all' : k ? 'some' : 'none');
+  const color = colors.size === 1 ? ([...colors][0] ?? null) : null;
+  return { bold: cov(nb), underline: cov(nu), hasColor: colored > 0, styled: styled > 0, color: colored === n ? color : null, any: n > 0 };
+}
+
+export type StyleOp = { kind: 'color'; name: string | null } | { kind: 'toggle'; style: 'b' | 'u' } | { kind: 'clear' };
+
+/**
+ * Change the selection's styles (SPEC §19): set or remove the colour (bold and underline stay),
+ * toggle bold or underline (decided once for the whole selection: all have it → remove, else add),
+ * or clear everything. Each text line is handled on its own; images and section headings are
+ * skipped. With only a cursor, the highlight it is in. One undo step; false if nothing to do.
+ */
+export function applyStyle(view: Pick<EditorView, 'state' | 'dispatch'>, op: StyleOp): boolean {
+  const { state } = view;
+  if (state.readOnly) return false;
+  const ts = targets(state);
+  if (!ts.length) return false;
+  let fn: (s: Style) => Style;
+  let adding: boolean;
+  if (op.kind === 'color') {
+    fn = (s) => ({ ...s, color: op.name });
+    adding = op.name !== null;
+  } else if (op.kind === 'toggle') {
+    const st = styleState(state);
+    if (!st.any) return false;
+    const add = (op.style === 'b' ? st.bold : st.underline) !== 'all';
+    fn = (s) => ({ ...s, [op.style]: add });
+    adding = add;
+  } else {
+    fn = () => ({ color: null, b: false, u: false });
+    adding = false;
+  }
   const changes: ChangeSpec[] = [];
   let selFrom: number | null = null;
   let selTo = 0;
   let delta = 0;
-  for (let pos = from; pos <= to; ) {
-    const line = doc.lineAt(pos);
-    const a = Math.max(from, line.from) - line.from;
-    const b = Math.min(to, line.to) - line.from;
-    pos = line.to + 1;
-    if (isImageLine(line) || isHeadingLine(line.text) || a >= b) continue; // never inside images or section headings
-    const runs = lineRuns(line.text);
-    const res = recolor(runs, runs.toPlain(a), runs.toPlain(b), name);
+  for (const t of ts) {
+    const res = restyle(t.runs, t.ps, t.pe, fn, adding && !t.cursor);
     if (!res) continue;
-    if (res.text !== line.text) changes.push({ from: line.from, to: line.to, insert: res.text });
-    const base = line.from + delta;
+    if (res.text !== t.line.text) changes.push({ from: t.line.from, to: t.line.to, insert: res.text });
+    const base = t.line.from + delta;
     selFrom ??= base + res.after[res.ps];
     selTo = base + res.before[res.pe];
-    delta += res.text.length - line.text.length;
+    delta += res.text.length - t.line.text.length;
   }
   if (selFrom === null) return false;
+  if (!changes.length && state.selection.main.empty) return true;
   view.dispatch({
     changes,
-    selection: EditorSelection.single(selFrom, selTo),
+    selection: state.selection.main.empty ? undefined : EditorSelection.single(selFrom, selTo),
     annotations: [highlightOp.of(true), isolateHistory.of('full')],
     userEvent: 'input.highlight',
     scrollIntoView: true,
   });
   return true;
+}
+
+// ---- applying and removing ----
+
+/**
+ * Colour the main selection with `name` (null removes the colour; bold and underline stay).
+ * Kept for callers that only deal with colours; see applyStyle.
+ */
+export function applyHighlight(view: Pick<EditorView, 'state' | 'dispatch'>, name: string | null): boolean {
+  return applyStyle(view, { kind: 'color', name });
 }
 
 export function highlights(): Extension {

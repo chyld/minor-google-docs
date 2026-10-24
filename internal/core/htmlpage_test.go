@@ -652,6 +652,9 @@ func TestPageLayoutMatchesApp(t *testing.T) {
 		{".cm-sec-head", ".sec-head", []string{"font-weight", "font-size", "line-height", "letter-spacing", "color"}},
 		{".cm-sec-bar", ".sec-body::before", []string{"width", "border-radius", "background", "opacity"}},
 		{".hl", ".hl", []string{"background", "color", "border-radius", "padding"}},
+		{".fmt-b", ".fmt-b", []string{"font-weight"}},
+		{".fmt-u", ".fmt-u", []string{"text-decoration", "text-decoration-thickness", "text-underline-offset"}},
+		{".cm-title-line .fmt-b", ".title .fmt-b", []string{"font-weight"}},
 		{".cm-img-frame img", ".img-frame img", []string{"max-height", "object-fit"}},
 		{".cm-img-caption", ".img figcaption", []string{"font-size", "color"}},
 		{".page", ".page", []string{"max-width"}},
@@ -666,5 +669,33 @@ func TestPageLayoutMatchesApp(t *testing.T) {
 	}
 	if !strings.Contains(rule(page, ".sec-body::before"), "left: -14px") || !strings.Contains(rule(app, ".cm-sec-bar"), "margin-left: -14px") {
 		t.Error("section bar offset")
+	}
+}
+
+// Bold and underline (SPEC §19): the page draws them from the parsed style; titles and search
+// see the text only; "## {b}" is not a section.
+func TestPageBoldAndUnderline(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	u := newUser(t, s, "alice")
+	body := "=={b}Bold== title\nplain =={u}under== =={coral+b}warm== =={sky-deep+b+u}all== =={bu}not==\n## {b} not a heading"
+	n, _ := s.CreateNote(ctx, u.ID, body)
+	art := article(renderPage(t, s, u.ID, n.ID))
+	for _, want := range []string{
+		`<p class="title"><span class="fmt-b">Bold</span> title</p>`,
+		`<span class="fmt-u">under</span>`,
+		`<span class="hl fmt-b" style="--h:25">warm</span>`,
+		`<span class="hl hl-deep fmt-b fmt-u" style="--h:228">all</span>`,
+		`=={bu}not==`,
+	} {
+		if !strings.Contains(art, want) {
+			t.Fatalf("missing %q in\n%s", want, art)
+		}
+	}
+	if strings.Contains(art, "sec-head") {
+		t.Fatal("## {b} became a section")
+	}
+	if DeriveTitle(body) != "Bold title" || !strings.Contains(SearchText(body), "plain under warm all =={bu}not==") {
+		t.Fatalf("title %q / search %q", DeriveTitle(body), SearchText(body))
 	}
 }

@@ -169,7 +169,7 @@ check('search finds highlighted words across the delimiters', found.some((n) => 
   await caret(0);
   await select('after image');
   await settle();
-  await page.click('.hl-float button[aria-label="Remove highlight"]');
+  await page.click('.hl-float button[aria-label="Remove colour"]');
   await settle();
   check('Remove on the floating bar removes the highlight', (await doc()).includes('\nafter image text'), await doc());
   await page.keyboard.press('Control+z');

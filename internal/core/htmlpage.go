@@ -681,11 +681,26 @@ func (p *Page) writeLine(w *pageWriter, l string) {
 	at := 0
 	for _, h := range ParseHighlights(l) {
 		w.esc(l[at:h.From])
-		cls := "hl"
-		if strings.HasSuffix(h.Name, "-deep") {
-			cls += " hl-deep"
+		// the tint only with a colour; bold and underline on their own (as in the editor)
+		st := ParseStyle(h.Name)
+		var cls []string
+		if st.Color != "" {
+			cls = append(cls, "hl")
+			if strings.HasSuffix(st.Color, "-deep") {
+				cls = append(cls, "hl-deep")
+			}
 		}
-		w.str("<span class=\"" + cls + "\" style=\"--h:" + strconv.Itoa(hueOf(h.Name)) + "\">")
+		if st.B {
+			cls = append(cls, "fmt-b")
+		}
+		if st.U {
+			cls = append(cls, "fmt-u")
+		}
+		w.str("<span class=\"" + strings.Join(cls, " ") + "\"")
+		if st.Color != "" {
+			w.str(" style=\"--h:" + strconv.Itoa(hueOf(st.Color)) + "\"")
+		}
+		w.str(">")
 		w.esc(l[h.TextFrom:h.TextTo])
 		w.str("</span>")
 		at = h.To

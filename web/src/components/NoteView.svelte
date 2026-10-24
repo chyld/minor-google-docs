@@ -23,7 +23,7 @@
   import { hlHue, isHlName, stripHighlights } from '../lib/highlight';
   import { stripSections } from '../lib/heading';
   import { MARKER_RE } from '../lib/ids';
-  import type { HighlightInfo } from '../lib/editor/highlights';
+  import type { HighlightInfo, StyleOp } from '../lib/editor/highlights';
   import type { SectionInfo } from '../lib/editor/sections';
 
   interface Props {
@@ -47,7 +47,7 @@
   let loadSeq = 0;
   let countTimer: ReturnType<typeof setTimeout> | undefined;
 
-  let hl = $state<HighlightInfo>({ can: false, empty: true, current: null, focused: false, dragging: false, rect: null });
+  let hl = $state<HighlightInfo>({ can: false, empty: true, current: null, focused: false, dragging: false, rect: null, bold: 'none', underline: 'none', hasColor: false, styled: false });
   let hlMenu = $state<'bar' | 'float' | null>(null);
   let hlLast = $state<string | null>(isHlName(localStorage.getItem('notes.hlLast') ?? '') ? localStorage.getItem('notes.hlLast') : null);
   let scroller: HTMLDivElement | undefined = $state();
@@ -350,6 +350,12 @@
     }
   }
 
+  /** Bold / underline / clear. The grid stays open after a toggle, so B then U works in one go. */
+  function format(op: StyleOp) {
+    editor.format(op, app.desktop);
+  }
+  const formatting = $derived({ bold: hl.bold, underline: hl.underline, hasColor: hl.hasColor, styled: hl.styled, onformat: format });
+
   function closeHighlightMenu() {
     hlMenu = null;
     editor.focus();
@@ -563,6 +569,11 @@
     };
     const onSave = () => void saveNow();
     const onSavePage = () => void saveAsPage();
+    const onFormat = (e: Event) => {
+      if (readonly || app.raw) return;
+      if (!hl.can) app.toast('Select some text first.', 'info');
+      else format((e as CustomEvent).detail as StyleOp);
+    };
     const onHide = () => {
       if (document.visibilityState === 'hidden') {
         saver?.writeDraft();
@@ -583,6 +594,7 @@
     window.addEventListener('notes:section-options', onSectionKeys);
     window.addEventListener('notes:save', onSave);
     window.addEventListener('notes:save-page', onSavePage);
+    window.addEventListener('notes:format', onFormat);
     document.addEventListener('visibilitychange', onHide);
     window.addEventListener('beforeunload', onUnload);
     window.addEventListener('pagehide', onPageHide);
@@ -598,6 +610,7 @@
       app.noteSections = [];
       window.removeEventListener('notes:save', onSave);
       window.removeEventListener('notes:save-page', onSavePage);
+      window.removeEventListener('notes:format', onFormat);
       document.removeEventListener('visibilitychange', onHide);
       window.removeEventListener('beforeunload', onUnload);
       window.removeEventListener('pagehide', onPageHide);
@@ -675,7 +688,7 @@
             onclick={() => (hlMenu = hlMenu === 'bar' ? null : 'bar')}><Icon name="highlight" /></button>
           {#if hlMenu === 'bar'}
             <button class="menu-scrim" tabindex="-1" aria-hidden="true" onmousedown={(e) => e.preventDefault()} onclick={closeHighlightMenu}></button>
-            <HighlightMenu class="hl-pop-bar" current={hl.current} last={hlLast} onpick={pickHighlight} onclose={closeHighlightMenu} />
+            <HighlightMenu class="hl-pop-bar" current={hl.current} last={hlLast} onpick={pickHighlight} onclose={closeHighlightMenu} {formatting} />
           {/if}
         </div>
         <button
@@ -811,18 +824,24 @@
     <!-- the little bar above a selection (desktop); mousedown is prevented so the editor keeps its selection -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="hl-float" style="left:{barPos.left}px; top:{barPos.top}px" bind:offsetWidth={barW} bind:offsetHeight={barH} onmousedown={(e) => e.preventDefault()}>
+      <button class="icon-btn tiny hl-fmt" title="Bold (Ctrl+B)" aria-label="Bold" aria-pressed={hl.bold === 'all' ? 'true' : hl.bold === 'some' ? 'mixed' : 'false'} onclick={() => format({ kind: 'toggle', style: 'b' })}><b>B</b></button>
+      <button class="icon-btn tiny hl-fmt" title="Underline (Ctrl+U)" aria-label="Underline" aria-pressed={hl.underline === 'all' ? 'true' : hl.underline === 'some' ? 'mixed' : 'false'} onclick={() => format({ kind: 'toggle', style: 'u' })}><u>U</u></button>
+      <span class="hl-float-sep" aria-hidden="true"></span>
       {#if hlLast}
         <button class="hl-float-last" title="Highlight ({hlLast})" aria-label="Highlight in the last colour" style="--h:{hlHue(hlLast)}" class:deep={hlLast.endsWith('-deep')} onclick={() => pickHighlight(hlLast)}><span>a</span></button>
       {/if}
       <button class="icon-btn tiny" title="Highlight colours (Ctrl+Shift+H)" aria-label="Highlight colours" aria-haspopup="grid" aria-expanded={hlMenu === 'float'} onclick={() => (hlMenu = hlMenu === 'float' ? null : 'float')}><Icon name="highlight" size={16} /></button>
-      {#if hl.current}
-        <button class="icon-btn tiny" title="Remove highlight" aria-label="Remove highlight" onclick={() => pickHighlight(null)}><Icon name="x" size={14} /></button>
+      {#if hl.hasColor}
+        <button class="icon-btn tiny" title="Remove colour" aria-label="Remove colour" onclick={() => pickHighlight(null)}><Icon name="x" size={14} /></button>
+      {/if}
+      {#if hl.styled}
+        <button class="icon-btn tiny" title="Clear formatting" aria-label="Clear formatting" onclick={() => format({ kind: 'clear' })}><Icon name="clear-format" size={15} /></button>
       {/if}
     </div>
     {#if hlMenu === 'float'}
       <button class="menu-scrim" tabindex="-1" aria-hidden="true" onmousedown={(e) => e.preventDefault()} onclick={closeHighlightMenu}></button>
       <div class="hl-pop-float" style="left:{popPos.left}px; top:{popPos.top}px" bind:offsetWidth={popW} bind:offsetHeight={popH}>
-        <HighlightMenu current={hl.current} last={hlLast} onpick={pickHighlight} onclose={closeHighlightMenu} />
+        <HighlightMenu current={hl.current} last={hlLast} onpick={pickHighlight} onclose={closeHighlightMenu} {formatting} />
       </div>
     {/if}
   {/if}

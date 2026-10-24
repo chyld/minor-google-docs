@@ -12,6 +12,7 @@ import (
 // testdata/sections.json.
 var sectionRe = regexp.MustCompile(`^## \{([a-z]+(?:-deep)?)\} ([^\n]*)$`)
 
+// sectionColors are the 24 colours (never the bold/underline style names).
 var highlightNameSet = func() map[string]bool {
 	m := map[string]bool{}
 	for _, n := range HighlightNames {

@@ -2432,6 +2432,19 @@ input:focus {
   background: oklch(var(--hl-deep-l) var(--hl-deep-c) var(--h));
   color: var(--hl-deep-ink);
 }
+/* bold and underline (a highlight's style set, SPEC §19) */
+.fmt-b {
+  font-weight: 700;
+}
+.fmt-u {
+  text-decoration: underline;
+  text-decoration-thickness: from-font;
+  text-underline-offset: 0.15em;
+}
+/* the title line is already heavier than bold */
+.cm-title-line .fmt-b {
+  font-weight: inherit;
+}
 .hl-delim {
   color: var(--muted);
   opacity: 0.75;
@@ -2529,6 +2542,46 @@ input:focus {
 }
 .hl-remove:hover {
   background: var(--surface-hover);
+}
+/* bold / underline / clear, above the colour swatches (note text only) */
+.hl-format {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.hl-format .hl-remove {
+  width: auto;
+  margin: 0;
+}
+.hl-fmt {
+  display: grid;
+  place-items: center;
+  min-width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  font-size: 15px;
+  color: var(--ink);
+}
+.hl-float .hl-fmt {
+  min-width: 26px;
+  height: 26px;
+}
+.hl-fmt:hover {
+  background: var(--surface-hover);
+}
+.hl-fmt[aria-pressed='true'] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.hl-fmt[aria-pressed='mixed'] {
+  background: linear-gradient(135deg, var(--accent-soft) 50%, transparent 50%);
+}
+.hl-float-sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 3px 2px;
+  background: var(--border);
 }
 .hl-hint {
   margin: 8px 2px 0;

@@ -81,6 +81,26 @@
     },
     {
       "line": "## {teal} \t "
+    },
+    {
+      "line": "## {b} Bold words",
+      "color": null,
+      "name": null
+    },
+    {
+      "line": "## {u} Under",
+      "color": null,
+      "name": null
+    },
+    {
+      "line": "## {coral+b} Mixed",
+      "color": null,
+      "name": null
+    },
+    {
+      "line": "## {b+u} Both",
+      "color": null,
+      "name": null
     }
   ],
   "strip": [
@@ -99,6 +119,22 @@
     {
       "in": "no sections here",
       "out": "no sections here"
+    },
+    {
+      "in": "## {b} Bold words",
+      "out": "## {b} Bold words"
+    },
+    {
+      "in": "## {u} Under",
+      "out": "## {u} Under"
+    },
+    {
+      "in": "## {coral+b} Mixed",
+      "out": "## {coral+b} Mixed"
+    },
+    {
+      "in": "## {b+u} Both",
+      "out": "## {b+u} Both"
     }
   ]
 }

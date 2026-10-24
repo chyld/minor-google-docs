@@ -109,6 +109,26 @@
     {
       "in": "=={sky}a=={coral}b== c",
       "out": "a{coral}b== c"
+    },
+    {
+      "in": "=={b}bold== and =={u}under==",
+      "out": "bold and under"
+    },
+    {
+      "in": "=={coral+b}x== =={sky-deep+b+u}y==",
+      "out": "x y"
+    },
+    {
+      "in": "=={u+b}wrong order==",
+      "out": "=={u+b}wrong order=="
+    },
+    {
+      "in": "=={bu}x== =={coralb}y== =={bold}z== =={B}w==",
+      "out": "=={bu}x== =={coralb}y== =={bold}z== =={B}w=="
+    },
+    {
+      "in": "=={b}==",
+      "out": "=={b}=="
     }
   ],
   "spans": [
@@ -211,6 +231,195 @@
           "sky"
         ]
       ]
+    },
+    {
+      "in": "=={b}bold== and =={u}under==",
+      "spans": [
+        [
+          "bold",
+          "b"
+        ],
+        [
+          "under",
+          "u"
+        ]
+      ]
+    },
+    {
+      "in": "=={coral+b}x== =={sky-deep+b+u}y==",
+      "spans": [
+        [
+          "x",
+          "coral+b"
+        ],
+        [
+          "y",
+          "sky-deep+b+u"
+        ]
+      ]
+    },
+    {
+      "in": "=={u+b}no== =={coralb}no== =={b+u}yes==",
+      "spans": [
+        [
+          "yes",
+          "b+u"
+        ]
+      ]
+    },
+    {
+      "in": "## {b} =={b}x==",
+      "spans": [
+        [
+          "x",
+          "b"
+        ]
+      ]
+    }
+  ],
+  "styles": [
+    "coral",
+    "coral+b",
+    "coral+u",
+    "coral+b+u",
+    "coral-deep",
+    "coral-deep+b",
+    "coral-deep+u",
+    "coral-deep+b+u",
+    "orange",
+    "orange+b",
+    "orange+u",
+    "orange+b+u",
+    "orange-deep",
+    "orange-deep+b",
+    "orange-deep+u",
+    "orange-deep+b+u",
+    "amber",
+    "amber+b",
+    "amber+u",
+    "amber+b+u",
+    "amber-deep",
+    "amber-deep+b",
+    "amber-deep+u",
+    "amber-deep+b+u",
+    "lime",
+    "lime+b",
+    "lime+u",
+    "lime+b+u",
+    "lime-deep",
+    "lime-deep+b",
+    "lime-deep+u",
+    "lime-deep+b+u",
+    "green",
+    "green+b",
+    "green+u",
+    "green+b+u",
+    "green-deep",
+    "green-deep+b",
+    "green-deep+u",
+    "green-deep+b+u",
+    "mint",
+    "mint+b",
+    "mint+u",
+    "mint+b+u",
+    "mint-deep",
+    "mint-deep+b",
+    "mint-deep+u",
+    "mint-deep+b+u",
+    "teal",
+    "teal+b",
+    "teal+u",
+    "teal+b+u",
+    "teal-deep",
+    "teal-deep+b",
+    "teal-deep+u",
+    "teal-deep+b+u",
+    "sky",
+    "sky+b",
+    "sky+u",
+    "sky+b+u",
+    "sky-deep",
+    "sky-deep+b",
+    "sky-deep+u",
+    "sky-deep+b+u",
+    "blue",
+    "blue+b",
+    "blue+u",
+    "blue+b+u",
+    "blue-deep",
+    "blue-deep+b",
+    "blue-deep+u",
+    "blue-deep+b+u",
+    "violet",
+    "violet+b",
+    "violet+u",
+    "violet+b+u",
+    "violet-deep",
+    "violet-deep+b",
+    "violet-deep+u",
+    "violet-deep+b+u",
+    "magenta",
+    "magenta+b",
+    "magenta+u",
+    "magenta+b+u",
+    "magenta-deep",
+    "magenta-deep+b",
+    "magenta-deep+u",
+    "magenta-deep+b+u",
+    "pink",
+    "pink+b",
+    "pink+u",
+    "pink+b+u",
+    "pink-deep",
+    "pink-deep+b",
+    "pink-deep+u",
+    "pink-deep+b+u",
+    "b",
+    "u",
+    "b+u"
+  ],
+  "parse": [
+    {
+      "name": "b",
+      "color": null,
+      "b": true,
+      "u": false
+    },
+    {
+      "name": "u",
+      "color": null,
+      "b": false,
+      "u": true
+    },
+    {
+      "name": "b+u",
+      "color": null,
+      "b": true,
+      "u": true
+    },
+    {
+      "name": "coral",
+      "color": "coral",
+      "b": false,
+      "u": false
+    },
+    {
+      "name": "coral+b",
+      "color": "coral",
+      "b": true,
+      "u": false
+    },
+    {
+      "name": "sky-deep+b+u",
+      "color": "sky-deep",
+      "b": true,
+      "u": true
+    },
+    {
+      "name": "pink-deep+u",
+      "color": "pink-deep",
+      "b": false,
+      "u": true
     }
   ]
 }
