@@ -132,8 +132,8 @@ func TestPageTitleCases(t *testing.T) {
 	long := strings.Repeat("long ", 60)
 	cases := []struct{ body, want string }{
 		{"## {coral} Heading as title\nbody", `<p class="title">## {coral} Heading as title</p>`}, // shown as typed, not a section
-		{"## {coral} \u00a0\nbody", "<p class=\"title\">## {coral} \u00a0</p>"},                  // nbsp name: still the title line
-		{long, `<p class="title">` + long + `</p>`},                                              // never truncated
+		{"## {coral} \u00a0\nbody", "<p class=\"title\">## {coral} \u00a0</p>"},                   // nbsp name: still the title line
+		{long, `<p class="title">` + long + `</p>`},                                               // never truncated
 		{"=={coral} ==\nreal title", `<p class="title">real title</p>`},
 	}
 	for _, c := range cases {
@@ -242,7 +242,6 @@ func TestPageImagesAndFiles(t *testing.T) {
 	}
 	_ = panelOnly
 }
-
 
 func TestPageAbortsWhenAFileShrinks(t *testing.T) {
 	s := newStore(t)
@@ -355,7 +354,6 @@ func TestPageTokensMatchApp(t *testing.T) {
 		}
 	}
 }
-
 
 // The embedded fonts are the ones the app ships (when web/node_modules is there).
 func TestPageFontsMatchApp(t *testing.T) {
