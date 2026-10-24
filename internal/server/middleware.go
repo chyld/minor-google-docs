@@ -264,6 +264,8 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		writeErr(w, http.StatusInsufficientStorage, "no_space", "the server is low on disk space; uploads are paused")
 	case errors.Is(err, core.ErrRefTaken):
 		writeErr(w, http.StatusConflict, "ref_taken", err.Error())
+	case errors.Is(err, core.ErrUploadPending):
+		writeErr(w, http.StatusConflict, "upload_pending", "Wait for the upload to finish: the page includes every file.")
 	case errors.Is(err, core.ErrCopyPending):
 		writeErr(w, http.StatusConflict, "copy_pending", core.ErrCopyPending.Error())
 	default:

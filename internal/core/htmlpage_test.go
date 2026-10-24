@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"html"
 	"os"
 	"path/filepath"
@@ -152,7 +153,7 @@ func TestPageEscapesEverything(t *testing.T) {
 	n, _ := s.CreateNote(ctx, u.ID, evil+"\n## {teal} "+evil+"\n=={coral}"+evil+"==")
 	img := uploadPNG(t, s, u.ID, n.ID, pngBytes)
 	s.RenameAttachment(ctx, u.ID, img.ID, `x" onload="alert(1).png`)
-	s.SaveBody(ctx, u.ID, n.ID, evil+"\n[image:"+img.Ref+"] "+evil, s.mustSHA(t, u.ID, n.ID))
+	s.SaveBody(ctx, u.ID, n.ID, evil+"\n## {teal} "+evil+"\n=={coral}"+evil+"==\n[image:"+img.Ref+"] "+evil, s.mustSHA(t, u.ID, n.ID))
 	tag, _ := s.CreateTag(ctx, u.ID, `<b>tag</b>`, "teal")
 	ids := []string{tag.ID}
 	s.PatchNote(ctx, u.ID, n.ID, NotePatch{TagIDs: &ids})
@@ -376,5 +377,233 @@ func TestPageFontsMatchApp(t *testing.T) {
 	}
 	if n != 7 {
 		t.Fatalf("%d font files", n)
+	}
+}
+
+// decodeBlocks returns the bytes of file n as stored in the page's chunk blocks.
+func decodeBlocks(t *testing.T, page string, n int) []byte {
+	t.Helper()
+	re := regexp.MustCompile(`<script type="application/octet-stream" data-f="` + strconv.Itoa(n) + `">([^<]*)</script>`)
+	var got []byte
+	for _, m := range re.FindAllStringSubmatch(page, -1) {
+		b, err := base64.StdEncoding.DecodeString(m[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, b...)
+	}
+	return got
+}
+
+func uploadBytes(t *testing.T, s *Store, uid, noteID, name string, data []byte) *Attachment {
+	t.Helper()
+	ctx := context.Background()
+	id := NewID()
+	if _, err := s.CreateUpload(ctx, uid, UploadMeta{ID: id, Ref: NewRef(), NoteID: noteID, Filename: name, Length: int64(len(data))}); err != nil {
+		t.Fatal(err)
+	}
+	a, _, err := s.AppendUpload(ctx, uid, id, 0, -1, bytes.NewReader(data))
+	if err != nil || a.State != "ready" {
+		t.Fatalf("upload %s: %v", name, err)
+	}
+	return a
+}
+
+func fileIndex(t *testing.T, s *Store, uid, noteID, attID string) int {
+	t.Helper()
+	p, err := s.PreparePage(context.Background(), uid, noteID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range p.files {
+		if f.Att.ID == attID {
+			return f.n
+		}
+	}
+	t.Fatal("file not in the page")
+	return -1
+}
+
+// Files across chunk boundaries (several chunks, exactly one chunk, a ragged end) and
+// an empty file come back byte for byte.
+func TestPageChunkBoundaries(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	u := newUser(t, s, "alice")
+	n, _ := s.CreateNote(ctx, u.ID, "Files")
+	cases := map[string][]byte{
+		"multi.bin": bytes.Repeat([]byte("0123456789abcdefg"), (2*pageChunk+1234)/17),
+		"exact.bin": bytes.Repeat([]byte{7}, pageChunk),
+		"empty.bin": {},
+	}
+	ids := map[string]string{}
+	for name, data := range cases {
+		ids[name] = uploadBytes(t, s, u.ID, n.ID, name, data).ID
+	}
+	page := renderPage(t, s, u.ID, n.ID)
+	for name, data := range cases {
+		if got := decodeBlocks(t, page, fileIndex(t, s, u.ID, n.ID, ids[name])); !bytes.Equal(got, data) {
+			t.Errorf("%s: %d bytes back, want %d", name, len(got), len(data))
+		}
+	}
+}
+
+// A large image shown twice is embedded once.
+func TestPageLargeImageOnce(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	u := newUser(t, s, "alice")
+	n, _ := s.CreateNote(ctx, u.ID, "P")
+	big := append([]byte("\x89PNG\r\n\x1a\nBIG"), bytes.Repeat([]byte{1}, pageSmallImage+10)...)
+	a := uploadPNG(t, s, u.ID, n.ID, big)
+	s.SaveBody(ctx, u.ID, n.ID, "P\n[image:"+a.Ref+"]\n[image:"+a.Ref+"]", s.mustSHA(t, u.ID, n.ID))
+	page := renderPage(t, s, u.ID, n.ID)
+	if c := strings.Count(page, `data-f="0" data-type="image/png"`); c != 2 {
+		t.Fatalf("%d images", c)
+	}
+	if got := decodeBlocks(t, page, 0); !bytes.Equal(got, big) {
+		t.Fatal("bytes differ (or embedded twice)")
+	}
+}
+
+// This note's copy can't be read: another note's copy stands in, listed once.
+func TestPageUnreadableFileUsesACopy(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root reads anything")
+	}
+	s := newStore(t)
+	ctx := context.Background()
+	u := newUser(t, s, "alice")
+	a, _ := s.CreateNote(ctx, u.ID, "A")
+	img := uploadPNG(t, s, u.ID, a.ID, pngBytes)
+	b, _ := s.CreateNote(ctx, u.ID, "B\n[image:"+img.Ref+"] pic")
+	bc, _ := scanAtt(s.DB.R.QueryRow(`SELECT `+attCols+` FROM attachments WHERE note_id=?`, b.ID))
+	os.Chmod(s.attPath(u.ID, &bc), 0)
+	defer os.Chmod(s.attPath(u.ID, &bc), 0o600)
+	page := renderPage(t, s, u.ID, b.ID)
+	if !strings.Contains(page, base64.StdEncoding.EncodeToString(pngBytes)) || strings.Count(page, `<li class="file">`) != 1 ||
+		!strings.Contains(page, "from another note") || strings.Contains(page, "missing on the server") {
+		t.Fatalf("the copy didn't stand in cleanly")
+	}
+}
+
+func TestPageFileVanishesOrGrows(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	u := newUser(t, s, "alice")
+	n, _ := s.CreateNote(ctx, u.ID, "N")
+	data := bytes.Repeat([]byte("zip "), 4000)
+	a := uploadBytes(t, s, u.ID, n.ID, "a.zip", data)
+	path := s.attPath(u.ID, a)
+	defer func() { pageBeforeWrite = nil }()
+
+	pageBeforeWrite = func(*Page) { os.Remove(path) }
+	p, _ := s.PreparePage(ctx, u.ID, n.ID, "")
+	if _, err := p.WriteTo(&bytes.Buffer{}); err == nil {
+		t.Fatal("a file deleted after the snapshot didn't fail the write")
+	}
+	os.WriteFile(path, data, 0o600)
+	pageBeforeWrite = func(*Page) {
+		f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		f.Write([]byte("more"))
+		f.Close()
+	}
+	p, _ = s.PreparePage(ctx, u.ID, n.ID, "")
+	var buf bytes.Buffer
+	if _, err := p.WriteTo(&buf); err != nil {
+		t.Fatalf("a file that grew: %v", err)
+	}
+	if got := decodeBlocks(t, buf.String(), 0); !bytes.Equal(got, data) {
+		t.Fatal("the page should hold the snapshot's bytes")
+	}
+}
+
+func TestPageImageAboveTitle(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	u := newUser(t, s, "alice")
+	n, _ := s.CreateNote(ctx, u.ID, "x")
+	img := uploadPNG(t, s, u.ID, n.ID, pngBytes)
+	s.SaveBody(ctx, u.ID, n.ID, "[image:"+img.Ref+"] cover\nThe title\nbody", s.mustSHA(t, u.ID, n.ID))
+	art := article(renderPage(t, s, u.ID, n.ID))
+	if f, ti := strings.Index(art, "<figure"), strings.Index(art, `<p class="title">The title</p>`); f < 0 || ti < 0 || f > ti {
+		t.Fatalf("image not above the title:\n%s", art)
+	}
+}
+
+func TestPageUploadsAndMissingText(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	u := newUser(t, s, "alice")
+	n, _ := s.CreateNote(ctx, u.ID, "N")
+	id, ref := NewID(), NewRef()
+	s.CreateUpload(ctx, u.ID, UploadMeta{ID: id, Ref: ref, NoteID: n.ID, Filename: "big.png", Length: 100})
+	s.SaveBody(ctx, u.ID, n.ID, "N\n[image:"+ref+"] coming", s.mustSHA(t, u.ID, n.ID))
+	if _, err := s.PreparePage(ctx, u.ID, n.ID, ""); !errors.Is(err, ErrUploadPending) {
+		t.Fatalf("a running upload: %v", err)
+	}
+	// an upload abandoned long ago doesn't block the page; its marker shows "not found"
+	s.DB.W.Exec(`UPDATE attachments SET updated_at=0 WHERE id=?`, id)
+	if art := article(renderPage(t, s, u.ID, n.ID)); !strings.Contains(art, "Image not found · coming") {
+		t.Fatal(art)
+	}
+	os.WriteFile(s.notePath(u.ID, n.ID), bytes.Repeat([]byte("a"), MaxBodyBytes+1), 0o600)
+	if _, err := s.PreparePage(ctx, u.ID, n.ID, ""); err == nil {
+		t.Fatal("an oversized note.txt was read")
+	}
+	os.Remove(s.notePath(u.ID, n.ID))
+	if _, err := s.PreparePage(ctx, u.ID, n.ID, ""); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing text: %v", err)
+	}
+}
+
+// The layout values copied from the app stay the app's.
+func TestPageLayoutMatchesApp(t *testing.T) {
+	app, err := os.ReadFile("../../web/src/app.css")
+	if err != nil {
+		t.Skip("web sources not available")
+	}
+	page, _ := os.ReadFile("../pageassets/page.css")
+	rule := func(css []byte, sel string) string {
+		i := bytes.Index(css, []byte("\n"+sel+" {"))
+		if i < 0 {
+			i = bytes.Index(css, []byte(sel+" {"))
+		}
+		if i < 0 {
+			t.Fatalf("no %q rule", sel)
+		}
+		j := bytes.IndexByte(css[i:], '}')
+		return string(css[i : i+j])
+	}
+	decl := func(block, prop string) string {
+		m := regexp.MustCompile(`(?:^|[\s;{])` + regexp.QuoteMeta(prop) + `:\s*([^;]+);`).FindStringSubmatch(block)
+		if m == nil {
+			return ""
+		}
+		return strings.TrimSuffix(strings.TrimSpace(m[1]), " !important")
+	}
+	pairs := []struct {
+		app, page string
+		props     []string
+	}{
+		{".cm-title-line", ".title", []string{"font-size", "font-weight", "letter-spacing", "line-height"}},
+		{".editor-host .cm-editor", "body", []string{"font-size", "line-height"}},
+		{".cm-sec-head", ".sec-head", []string{"font-weight", "font-size", "line-height", "letter-spacing", "color"}},
+		{".cm-sec-bar", ".sec-body::before", []string{"width", "border-radius", "background", "opacity"}},
+		{".hl", ".hl", []string{"background", "color", "border-radius", "padding"}},
+		{".cm-img-frame img", ".img-frame img", []string{"max-height", "object-fit"}},
+		{".cm-img-caption", ".img figcaption", []string{"font-size", "color"}},
+		{".page", ".page", []string{"max-width"}},
+	}
+	for _, p := range pairs {
+		a, b := rule(app, p.app), rule(page, p.page)
+		for _, prop := range p.props {
+			if decl(a, prop) == "" || decl(a, prop) != decl(b, prop) {
+				t.Errorf("%s %s: app %q, page %q", p.page, prop, decl(a, prop), decl(b, prop))
+			}
+		}
+	}
+	if !strings.Contains(rule(page, ".sec-body::before"), "left: -14px") || !strings.Contains(rule(app, ".cm-sec-bar"), "margin-left: -14px") {
+		t.Error("section bar offset")
 	}
 }

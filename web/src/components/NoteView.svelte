@@ -464,22 +464,26 @@
     const id = note.id; // the note the action was for, even if another opens meanwhile
     const ro = readonly;
     pageBusy = true;
-    try {
-      if (!ro) {
-        await saveNow();
-        const s = existingSaver(id);
-        if (s && (s.dirty || s.conflict || s.status === 'error')) {
-          app.toast('Save your changes first: the page is made from the saved note.', 'error');
-          return;
-        }
+    // checked again just before downloading: typing or an upload may start while waiting
+    const ready = (): boolean => {
+      const s = existingSaver(id);
+      if (!ro && s && (s.dirty || s.conflict || s.status === 'error')) {
+        app.toast('Save your changes first: the page is made from the saved note.', 'error');
+        return false;
       }
       if (uploads.tasks.some((t) => t.noteId === id && (t.status === 'uploading' || t.status === 'retrying'))) {
         app.toast('Wait for the upload to finish: the page includes every file.', 'info');
-        return;
+        return false;
       }
+      return true;
+    };
+    try {
+      if (!ro) await saveNow();
+      if (!ready()) return;
       const { bytes: size } = await api.pageSize(id, app.theme);
       if (size > 100 * 1024 * 1024 && !confirm(`This page will be about ${bytes(size)} because it includes every file. Very large pages can be slow to open, and some tunnels or proxies refuse downloads this big.\n\nDownload it?`)) return;
-      downloadPage(id, app.theme);
+      if (!ready()) return;
+      await downloadPage(id, app.theme);
     } catch (e) {
       app.error(e);
     } finally {

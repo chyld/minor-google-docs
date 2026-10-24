@@ -1022,17 +1022,25 @@ which can be saved back from the page. No size limit. The page needs nothing fro
   as web page"). The client remembers which note it was for, saves it first and refuses (with a
   message) if it still has unsaved changes, a conflict, a save error or an upload in progress. It asks
   `GET /api/notes/{id}/html?estimate=1` for the size and confirms above 100 MB (about the size, slow
-  to open, tunnels may refuse), then downloads `GET /api/notes/{id}/html?theme=…`.
+  to open, tunnels may refuse), checks again for unsaved changes and uploads, sends a `HEAD` (so an
+  error is shown, never saved as the page), then downloads `GET /api/notes/{id}/html?theme=…`.
 - **Server** (`internal/core/htmlpage.go`): `PreparePage` authorizes the note (404 otherwise; trashed
-  allowed) and takes a snapshot first: the text (`note.txt`, LF, valid UTF-8, no NUL; any length of
-  line), tags in the note's order, its ready attachments, and for every image the text shows but the
-  note doesn't have (or whose file is gone) the copy in another note, as the editor does. Size and
+  allowed), refuses with `409 upload_pending` while an upload to the note is running (from any tab;
+  an upload quiet for 5 minutes no longer counts), and takes a snapshot first: the text (`note.txt`,
+  at most 10 MiB, LF, valid UTF-8, no NUL; any length of line; missing → 404), tags (app order: by
+  name), its ready attachments, and for every image the text shows but the note doesn't have (or
+  whose file can't be read) the copy in another note, as the editor does. Every file is opened once
+  to prove it can be read; one that can't is listed as "missing on the server" (or replaced by
+  another note's copy, then not listed twice). Database errors fail the request, never a page that
+  quietly lacks something. Size and
   WriteTo walk the same renderer, so the estimate, `Content-Length` and the bytes written are equal by
-  construction. Files are read with their snapshot sizes; any read or write failure after the
-  headers resets the connection (`http.ErrAbortHandler`), so the browser reports a failed download,
-  never a page that looks complete but isn't. The zip export now does the same.
-- **Requests from other sites** (`Sec-Fetch-Site: cross-site`) are refused for the page and the
-  export, so another site can't make the browser download someone's notes.
+  construction. Files are read with their snapshot sizes, one open at a time (closed after their
+  last block); any read or write failure after the headers resets the connection
+  (`http.ErrAbortHandler`), so the browser reports a failed download, never a page that looks
+  complete but isn't. The zip export now does the same. `HEAD` answers the headers only.
+- **Requests from other sites** are refused for the page and the export: `Sec-Fetch-Site` must be
+  absent, `same-origin` or `none` (typed or bookmarked), so another site or a sibling subdomain can't
+  make the browser download someone's notes.
 - **Rendering** follows the editor: the title line is the first line that isn't an image and has text
   once highlights are stripped (JavaScript whitespace rules), shown in full; a title line shaped like a
   heading is shown as typed and isn't a section. Images above it stay above it. Plain text runs are
@@ -1044,10 +1052,14 @@ which can be saved back from the page. No size limit. The page needs nothing fro
   "Image not found · caption". Captions only when there is one. The end mark when the note has text,
   then the word and character counts, then the attachments (thumbnail only for images the text doesn't
   show; flags for "not shown in the note" and "from another note"; size; Save).
-- **Bytes:** every file is in the page once. Images up to 2 MB are `data:` URLs (they show even with
-  scripts off); everything else is stored after the script as `<script type="application/octet-stream">`
-  base64 chunks of ≤ 4 MiB, decoded one chunk at a time into a Blob when shown or saved. Save always
-  downloads (`application/octet-stream`, the export's safe file name), never opens a file.
+- **Bytes:** every file is in the page once. Images up to 2 MB are `data:` URLs at their first
+  appearance (they show even with scripts off; repeats are filled in by the script); everything else
+  is stored after the script as `<script type="application/octet-stream">` base64 chunks of ≤ 4 MiB,
+  decoded one chunk at a time into a Blob the first time it is shown or saved, after which the base64
+  text is dropped. A file still costs about its size twice in browser memory (its base64 in the
+  page, then its Blob). Save always downloads (`application/octet-stream`, the export's safe file
+  name), never opens a file; a file that can't be read says so on its button. Images zoom with a
+  click, Enter or Space.
 - **Safety:** every piece of note text is HTML-escaped; no note data is ever in a script, style value,
   URL or event handler. One constant script (`internal/pageassets/page.js`); the page's CSP (meta tag,
   and as a header with `sandbox`) is `default-src 'none'; img-src data: blob:; style-src 'unsafe-inline';
@@ -1055,8 +1067,9 @@ which can be saved back from the page. No size limit. The page needs nothing fro
   with the hash computed from the script itself. A test asserts exactly one executable script and no
   event handler attribute. Without scripts the text and small images still show, with a line saying
   saving files needs JavaScript.
-- **Look:** the app's colour tokens (`PageTokens`, compared with `web/src/app.css` and `colors.ts`
-  by a Go test), the app's Inter font (all its subsets, embedded once, ~290 KB; OFL), light or dark
+- **Look:** the note sits on a card (a standalone page has no app around it); inside, the app's
+  colour tokens (`PageTokens`, compared with `web/src/app.css` and `colors.ts` by a Go test, as are
+  the title, body, section, bar, highlight, image and caption rules), the app's Inter font (all its subsets, embedded once, ~290 KB; OFL), light or dark
   following the app's theme setting (system → the reader's system). Dates are shown in the reader's
   time zone. Print: light colours always, highlight/chip/bar colours kept, no buttons or counts,
   headings kept with what follows, images not split.

@@ -47,7 +47,7 @@ async function uploadFile(noteId, name, bytesB64) {
 }
 
 // ---- a note with everything in it ----
-const pdf = Buffer.concat([Buffer.from('%PDF-1.4\n'), crypto.randomBytes(3 * 1024 * 1024)]); // > 1 chunk of nothing special
+const pdf = Buffer.concat([Buffer.from('%PDF-1.4\n'), crypto.randomBytes(20 * 1024 * 1024 + 7)]); // 20 MB: several chunks, ragged end
 const id = await makeNote([`Trip ${tag}`, 'day one', { img: 140 }, '', '## {teal} Packing', 'boots', '', '']);
 await page.evaluate(async ([id, H]) => {
   const n = await (await fetch(`/api/notes/${id}`, { headers: H })).json();
@@ -122,10 +122,11 @@ async function inspect(br, label) {
       ink: cs('body').color,
       bar: document.querySelector('.sec-body') ? getComputedStyle(document.querySelector('.sec-body'), '::before').width : '',
       blank: (() => {
-        // a run ending in blank lines is taller than one line of text
+        // the two blank lines after the "Packing" section keep their height
         const runs = [...document.querySelectorAll('.text')];
         const one = runs.find((r) => r.textContent === 'boots');
-        return one ? one.getBoundingClientRect().height : 0;
+        const blanks = runs.find((r) => r.textContent === '\n\n');
+        return one && blanks ? blanks.getBoundingClientRect().height / one.getBoundingClientRect().height : 0;
       })(),
       end: !!document.querySelector('.note-end'),
       files: [...document.querySelectorAll('.file .name')].map((n) => n.textContent),
@@ -137,6 +138,7 @@ async function inspect(br, label) {
   check(`${label}: images decode offline (incl. the large photo, twice)`, r.imgs && r.count === 3, r.count);
   check(`${label}: highlights and section colours are drawn`, !!r.hl && r.hl !== 'rgba(0, 0, 0, 0)' && r.secColor !== r.ink, r);
   check(`${label}: the section bar is there (3px)`, r.bar === '3px', r.bar);
+  check(`${label}: blank lines keep their height`, r.blank > 1.9 && r.blank < 2.1, r.blank);
   check(`${label}: the end mark and the file list`, r.end && r.files.includes('tickets.pdf'), r.files);
   check(`${label}: the script ran (the "needs JavaScript" line is gone)`, !r.noscript);
   check(`${label}: the app's font is embedded and used`, r.fontLoaded && r.font.includes('Inter'), r.font);
@@ -211,6 +213,46 @@ await page.click('[role="menuitem"]:has-text("Save as web page")');
 await page.waitForTimeout(800);
 check('over 100 MB it asks first (and Cancel downloads nothing)', /about 700 MB/.test(asked) && !downloaded, asked);
 await page.unroute('**/html?estimate=1**');
+
+// ---- refusals: unsaved changes, an upload still running ----
+{
+  const n = await makeNote([`Busy ${tag}`, 'text']);
+  await open(n);
+  await page.route('**/api/notes/*/body', (r) => r.fulfill({ status: 500, contentType: 'application/json', body: '{"error":{"code":"internal","message":"x"}}' }));
+  await page.evaluate(() => __v.dispatch({ changes: { from: __v.state.doc.length, insert: ' more' } }));
+  let got = false;
+  page.once('download', () => (got = true));
+  await page.click('button[aria-label="More actions"]');
+  await page.click('[role="menuitem"]:has-text("Save as web page")');
+  await page.waitForTimeout(1500);
+  const toast = await page.textContent('.toast, [role="status"]').catch(() => '');
+  check('with unsaved changes it refuses and says why (no download)', !got && /save your changes first/i.test(await page.content()), toast);
+  await page.unroute('**/api/notes/*/body');
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('notes:save')));
+  await page.waitForTimeout(1200);
+  // an upload started elsewhere (another tab): the server refuses
+  await page.evaluate(async (n) => {
+    const e = (s) => btoa(s);
+    const b = crypto.getRandomValues(new Uint8Array(16));
+    const ts = Date.now();
+    for (let i = 0; i < 6; i++) b[i] = Math.floor(ts / 2 ** (8 * (5 - i))) & 0xff;
+    b[6] = (b[6] & 0x0f) | 0x70;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    const h = [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+    const id = `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+    const A = 'abcdefghijklmnopqrstuvwxyz234567';
+    const ref = Array.from(crypto.getRandomValues(new Uint8Array(10)), (x) => A[x & 31]).join('');
+    const r = await fetch('/api/uploads/', { method: 'POST', headers: { 'X-Requested-With': 'notes', 'Tus-Resumable': '1.0.0', 'Upload-Length': '1000',
+      'Upload-Metadata': [`id ${e(id)}`, `ref ${e(ref)}`, `note_id ${e(n)}`, `filename ${e('later.png')}`].join(',') } });
+    if (r.status !== 201) throw new Error('upload create ' + r.status);
+  }, n);
+  got = false;
+  page.once('download', () => (got = true));
+  await page.click('button[aria-label="More actions"]');
+  await page.click('[role="menuitem"]:has-text("Save as web page")');
+  await page.waitForTimeout(1500);
+  check('with an upload still running (even from another tab) it refuses and says why', !got && /wait for the upload to finish/i.test(await page.content()));
+}
 
 // ---- trashed notes: the button sits beside Restore ----
 await api('PATCH', `/api/notes/${id}`, { trashed: true });

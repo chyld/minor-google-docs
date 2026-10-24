@@ -99,10 +99,18 @@ export const api = {
   deleteAttachment: (id: string) => request<void>('DELETE', `/api/attachments/${id}`),
 };
 
-/** Starts a download of one note as a self-contained web page (SPEC §23). */
-export function downloadPage(id: string, theme: string) {
+/** Starts a download of one note as a self-contained web page (SPEC §23). A quick HEAD
+ * first, so an error (note deleted, upload still running) is shown, never saved as the page. */
+export async function downloadPage(id: string, theme: string) {
+  const url = `/api/notes/${id}/html?theme=${encodeURIComponent(theme)}`;
+  const res = await fetch(url, { method: 'HEAD', headers: { 'X-Requested-With': 'notes' } });
+  if (!res.ok) {
+    // HEAD has no body: ask again for the message
+    await request('GET', `/api/notes/${id}/html?estimate=1&theme=${encodeURIComponent(theme)}`);
+    throw new ApiError(res.status, 'error', 'The page could not be made. Try again.');
+  }
   const a = document.createElement('a');
-  a.href = `/api/notes/${id}/html?theme=${encodeURIComponent(theme)}`;
+  a.href = url;
   a.download = '';
   document.body.append(a);
   a.click();

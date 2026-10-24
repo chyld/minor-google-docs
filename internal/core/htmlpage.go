@@ -48,13 +48,14 @@ func hueOf(name string) int {
 
 // PageFile is one file the page carries.
 type PageFile struct {
-	Att     Attachment
-	path    string
-	size    int64
-	own     bool // in this note (otherwise a copy from another note, shown in the text)
-	shown   bool // shown in the text by a marker
-	missing bool // no file on disk
-	n       int
+	Att        Attachment
+	path       string
+	size       int64
+	own        bool // in this note (otherwise a copy from another note, shown in the text)
+	shown      bool // shown in the text by a marker
+	missing    bool // no readable file on disk
+	superseded bool // this note's unreadable copy, replaced by another note's (not listed)
+	n          int
 }
 
 func (f *PageFile) inline() bool { return InlineImageTypes[f.Att.Mime] }
@@ -83,8 +84,16 @@ func (s *Store) PreparePage(ctx context.Context, uid, id, theme string) (*Page, 
 	if err != nil {
 		return nil, err
 	}
-	raw, err := os.ReadFile(s.notePath(uid, id))
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+	// a busy upload would be missing from the page: wait for it (rows left behind by
+	// an abandoned upload stop counting after a few minutes; the janitor removes them)
+	if s.exists(ctx, `SELECT 1 FROM attachments WHERE note_id=? AND user_id=? AND state='uploading' AND updated_at>?`,
+		id, uid, now()-int64(uploadQuiet/time.Millisecond)) {
+		return nil, ErrUploadPending
+	}
+	raw, err := readCapped(s.notePath(uid, id), MaxBodyBytes)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, ErrNotFound // purged meanwhile, or its text is lost (doctor reports it)
+	} else if err != nil {
 		return nil, err
 	}
 	body := cleanPageText(string(raw))
@@ -96,6 +105,7 @@ func (s *Store) PreparePage(ctx context.Context, uid, id, theme string) (*Page, 
 	default:
 		p.theme = "auto"
 	}
+	// tags in the app's order (by name)
 	rows, err := s.DB.R.QueryContext(ctx, `SELECT t.name,t.color FROM tags t JOIN note_tags nt ON nt.tag_id=t.id
  WHERE nt.note_id=? AND t.user_id=? ORDER BY t.name`, id, uid)
 	if err != nil {
@@ -109,28 +119,41 @@ func (s *Store) PreparePage(ctx context.Context, uid, id, theme string) (*Page, 
 		}
 		p.tags = append(p.tags, t)
 	}
+	err = rows.Err()
 	rows.Close()
+	if err != nil {
+		return nil, err
+	}
 	atts, err := s.ListAttachments(ctx, uid, id)
 	if err != nil {
 		return nil, err
 	}
+	own := map[string]*PageFile{}
 	for _, a := range atts {
-		f := p.addFile(s, a, true)
-		p.byRef[a.Ref] = f
+		own[a.Ref] = p.addFile(s, a, true)
 	}
 	// images the text shows from another note (a copy not made yet, or this note's
-	// copy lost its file): the same lookup as the editor's
+	// copy can't be read): the same lookup as the editor's
 	for _, ref := range markerRefs(body) {
-		if f := p.byRef[ref]; f != nil && !f.missing {
+		if f := own[ref]; f != nil && !f.missing {
 			f.shown = true
+			p.byRef[ref] = f
 			continue
 		}
-		if c := s.pageCopy(ctx, uid, ref, id); c != nil {
+		c, err := s.pageCopy(ctx, uid, ref, id)
+		if err != nil {
+			return nil, err
+		}
+		if c != nil {
+			if f := own[ref]; f != nil {
+				f.superseded = true // the copy stands in for this note's unreadable file
+			}
 			f := p.addFile(s, *c, false)
 			f.shown = true
 			p.byRef[ref] = f
-		} else if f := p.byRef[ref]; f != nil {
+		} else if f := own[ref]; f != nil {
 			f.shown = true
+			p.byRef[ref] = f
 		}
 	}
 	n, err := p.render(nil, nil)
@@ -141,37 +164,83 @@ func (s *Store) PreparePage(ctx context.Context, uid, id, theme string) (*Page, 
 	return p, nil
 }
 
+// ErrUploadPending: an upload to the note is still running.
+var ErrUploadPending = errors.New("an upload to this note is still running: wait for it to finish")
+
+// uploads quiet for this long count as abandoned for the page
+const uploadQuiet = 5 * time.Minute
+
+func readCapped(path string, limit int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > limit {
+		return nil, Invalid("this note is larger than %d MiB", limit>>20)
+	}
+	return b, nil
+}
+
+// addFile adds a file to the page's inventory. A file that can't be opened counts as
+// missing, so the snapshot never promises bytes the write can't read.
 func (p *Page) addFile(s *Store, a Attachment, own bool) *PageFile {
-	f := &PageFile{Att: a, own: own, n: len(p.files)}
+	f := &PageFile{Att: a, own: own, n: len(p.files), missing: true}
 	if a.Ext != "" {
 		f.path = s.attPath(p.uid, &a)
-		if st, err := os.Stat(f.path); err == nil && st.Mode().IsRegular() {
-			f.size = st.Size()
-		} else {
-			f.missing = true
+		if size, ok := openable(f.path); ok {
+			f.size, f.missing = size, false
 		}
-	} else {
-		f.missing = true
 	}
 	p.files = append(p.files, f)
 	return f
 }
 
-// pageCopy finds a ready copy of ref in another of the user's notes whose file exists.
-func (s *Store) pageCopy(ctx context.Context, uid, ref, noteID string) *Attachment {
+// openable opens a regular file just to prove it can be read, and returns its size.
+func openable(path string) (int64, bool) {
+	fh, err := os.Open(path)
+	if err != nil {
+		return 0, false
+	}
+	defer fh.Close()
+	st, err := fh.Stat()
+	if err != nil || !st.Mode().IsRegular() {
+		return 0, false
+	}
+	return st.Size(), true
+}
+
+// pageCopy finds a ready copy of ref in another of the user's notes that can be read.
+func (s *Store) pageCopy(ctx context.Context, uid, ref, noteID string) (*Attachment, error) {
 	rows, err := s.DB.R.QueryContext(ctx, `SELECT `+attCols+` FROM attachments
  WHERE user_id=? AND ref=? AND state='ready' AND note_id!=? AND ext!='' ORDER BY created_at DESC, id`, uid, ref, noteID)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	defer rows.Close()
+	var cands []Attachment
 	for rows.Next() {
 		a, err := scanAtt(rows)
-		if err == nil && fileExists(s.attPath(uid, &a)) {
-			return &a
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		cands = append(cands, a)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	for i := range cands {
+		if _, ok := openable(s.attPath(uid, &cands[i])); ok {
+			return &cands[i], nil
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 // Size is the exact number of bytes WriteTo writes.
@@ -183,6 +252,9 @@ func (p *Page) Filename() string { return safeName(p.Title) + ".html" }
 // WriteTo writes the page. Any error after the first byte means the output is
 // incomplete: the caller must abort the response, never end it normally.
 func (p *Page) WriteTo(w io.Writer) (int64, error) {
+	if pageBeforeWrite != nil {
+		pageBeforeWrite(p)
+	}
 	files := map[int]*os.File{}
 	defer func() {
 		for _, f := range files {
@@ -195,6 +267,9 @@ func (p *Page) WriteTo(w io.Writer) (int64, error) {
 	}
 	return n, err
 }
+
+// pageBeforeWrite lets tests change files between the snapshot and the write.
+var pageBeforeWrite func(*Page)
 
 // PageCSP is the content security policy of every page (also sent as a header).
 func PageCSP() string {
@@ -344,8 +419,10 @@ func (w *pageWriter) str(s string) {
 
 func (w *pageWriter) esc(s string) { w.str(html.EscapeString(s)) }
 
-// b64 writes n bytes of file f from off as base64.
-func (w *pageWriter) b64(f *PageFile, off, n int64) {
+// b64 writes n bytes of file f from off as base64. last closes the file afterwards:
+// a file's bytes are written in one go (small image) or one run of chunks, so only
+// one file is ever open.
+func (w *pageWriter) b64(f *PageFile, off, n int64, last bool) {
 	if w.err != nil {
 		return
 	}
@@ -372,6 +449,10 @@ func (w *pageWriter) b64(f *PageFile, off, n int64) {
 	w.n += cw.n
 	if err == nil && got != n {
 		err = fmt.Errorf("%s: read %d bytes, expected %d", f.Att.Filename, got, n)
+	}
+	if last {
+		fh.Close()
+		delete(w.files, f.n)
 	}
 	w.err = err
 }
@@ -438,7 +519,7 @@ func (p *Page) render(out io.Writer, files map[int]*os.File) (int64, error) {
 		}
 		for off := int64(0); off < f.size || (off == 0 && f.size == 0); off += pageChunk {
 			w.str("<script type=\"application/octet-stream\" data-f=\"" + strconv.Itoa(f.n) + "\">")
-			w.b64(f, off, min(pageChunk, f.size-off))
+			w.b64(f, off, min(pageChunk, f.size-off), off+pageChunk >= f.size)
 			w.str("</script>\n")
 			if f.size == 0 {
 				break
@@ -627,28 +708,41 @@ func (p *Page) writeFigure(w *pageWriter, l string) {
 // data: URL the first time it appears; the script fills in the others.
 func (p *Page) writeImg(w *pageWriter, f *PageFile, class, alt string) {
 	w.str("<img")
+	if class == "" {
+		w.str(" tabindex=\"0\"") // Enter or Space zooms, like a click
+	}
 	if class != "" {
 		w.str(" class=\"" + class + "\"")
 	}
 	w.str(" alt=\"")
 	w.esc(alt)
-	w.str("\" decoding=\"async\" data-f=\"" + strconv.Itoa(f.n) + "\" data-type=\"" + f.Att.Mime + "\"")
+	mt := html.EscapeString(strings.TrimSpace(strings.SplitN(f.Att.Mime, ";", 2)[0]))
+	w.str("\" decoding=\"async\" data-f=\"" + strconv.Itoa(f.n) + "\" data-type=\"" + mt + "\"")
 	if f.small() && !w.srcAt[f.n] {
 		w.srcAt[f.n] = true
-		w.str(" src=\"data:" + f.Att.Mime + ";base64,")
-		w.b64(f, 0, f.size)
+		w.str(" src=\"data:" + mt + ";base64,")
+		w.b64(f, 0, f.size, true)
 		w.str("\"")
 	}
 	w.str(">")
 }
 
 func (p *Page) renderFiles(w *pageWriter) {
-	if len(p.files) == 0 {
+	listed := 0
+	for _, f := range p.files {
+		if !f.superseded {
+			listed++
+		}
+	}
+	if listed == 0 {
 		return
 	}
 	w.str("<section class=\"files\"><h2>Attachments</h2><ul>\n")
 	saveable := false
 	for _, f := range p.files {
+		if f.superseded {
+			continue
+		}
 		w.str("<li class=\"file\">")
 		if f.inline() && !f.shown && !f.missing {
 			p.writeImg(w, f, "thumb", "")

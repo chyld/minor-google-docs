@@ -480,10 +480,12 @@ func (s *Server) handleDeleteAttachment(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// crossSite reports a request started by another site (a link or form elsewhere):
-// downloads of a user's data must come from the app itself.
+// crossSite reports a request started by another site (a link or form elsewhere, a
+// sibling subdomain): downloads of a user's data must come from the app itself, or
+// be typed in / bookmarked ("none"). Browsers that send no Sec-Fetch-Site rely on the
+// SameSite cookie and the unguessable note id.
 func crossSite(w http.ResponseWriter, r *http.Request) bool {
-	if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+	if v := r.Header.Get("Sec-Fetch-Site"); v != "" && v != "same-origin" && v != "none" {
 		writeErr(w, http.StatusForbidden, "cross_site", "open this from the app")
 		return true
 	}
@@ -531,6 +533,9 @@ func (s *Server) handleNotePage(w http.ResponseWriter, r *http.Request) {
 	h.Set("Content-Length", strconv.FormatInt(p.Size(), 10))
 	h.Set("Content-Security-Policy", core.PageCSP()+"; sandbox") // replaces the app's policy
 	h.Set("Cache-Control", "no-store")
+	if r.Method == http.MethodHead {
+		return // the client's check before downloading: headers only
+	}
 	if _, err := p.WriteTo(slidingWrites(w)); err != nil {
 		s.log.Error("web page failed mid-stream", "note", id, "err", err)
 		panic(http.ErrAbortHandler) // never a page that looks complete but isn't
