@@ -833,17 +833,26 @@ of the new names literally (e.g. text about this syntax) is read as formatted si
   underline. A cursor in a span's text acts on that whole span; in plain text nothing happens (there is
   no "bold the next characters"). Drawn with `.fmt-b` (700) / `.fmt-u` (underline, from-font thickness);
   the tint (`.hl`, `--h`) only when there is a colour; in the title line bold keeps the title's 760.
-  Ctrl+B / Ctrl+U (Cmd on a Mac) toggle; they are always swallowed by the editor (so Firefox's bookmarks
-  sidebar and view-source never open), do nothing in raw view, read-only notes, on images and headings,
-  and wait while an input method is composing. Palette: Bold, Underline, Clear formatting.
+  Ctrl+B / Ctrl+U (Cmd on a Mac) toggle; in the editor they are always swallowed (so Firefox's bookmarks
+  sidebar and view-source don't open), also while an input method is composing (then they do nothing),
+  and do nothing in raw view, read-only notes, on images and headings. Ctrl+Shift+B / U are left to the
+  browser. Ctrl+U replaces CodeMirror's rarely used "undo selection". A bare cursor keeps its place in
+  the text after a change. Characters a highlight can never carry (an "=" of "==" inside it, a trailing
+  "=") don't count for the toggle, so "a == b" switches on and off. A selection that crosses a section
+  heading formats the text around it (the heading is skipped). Palette: Bold, Underline, Clear
+  formatting (not for read-only notes).
 - **UI.** Note-bar highlighter button (enabled with a selection or a cursor in a highlight) opens a
   12×2 grid (6 columns on phones, pinned to the bottom) with Bold, Underline (pressed: on / mixed / off)
   and Clear formatting above it, and "Remove colour" when the selection has one; these toggles keep the
   menu open, colours close it. The section colour pickers use the same grid without the formatting row.
   Desktop also gets a small bar above a selection (fixed position, kept inside the note's scroll area,
   below the selection near the top; its menu kept inside the window): Bold, Underline, last colour,
-  colours, Remove colour, Clear formatting. The bold/underline state is exact for selections up to
-  50,000 characters (beyond that the buttons show "mixed").
+  colours, Remove colour, Clear formatting. The bold/underline state is only worked out while one of
+  these menus is showing, over at most 200,000 characters of line text (beyond that the buttons show
+  "mixed").
+- **New rules, old notes.** Titles, previews and search text are derived with versioned rules
+  (`deriveVersion` in `maintenance.go`); when they change (as with bold/underline), startup reconcile
+  re-derives every note once.
   Arrow keys follow the visible columns. Ctrl+Shift+H opens the
   grid; arrows move, Enter applies, Esc returns to the editor. The grid starts on the current or last
   colour, so Ctrl+Shift+H, Enter repeats it. Menus keep the editor's selection (mousedown prevented).
@@ -1025,7 +1034,7 @@ A note can be divided into named, coloured sections. Design reviewed by the beta
   - Title, preview, search index and snippets (`core.SearchText`) and footer counts drop the markup and
     keep the name.
   - Export and backups keep the raw text.
-  - The highlight tools are off when the selection touches a heading.
+  - Highlights and formatting skip headings: a selection that touches one formats the text around it.
 - **Phones.** The note-bar section buttons are hidden below 560 px. The ⋯ menu has "Add section" and
   "Sections". Popovers are pinned to the bottom of the screen.
 

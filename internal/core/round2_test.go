@@ -286,6 +286,11 @@ func TestHighlightFixtures(t *testing.T) {
 			t.Errorf("ParseStyle(%q) = %+v (%q)", c.Name, got, StyleName(got))
 		}
 	}
+	for _, bad := range []string{"u+b", "bu", "coralb", "bold", "B", "", "coral+b+b"} {
+		if got := ParseStyle(bad); got != (Style{}) {
+			t.Errorf("ParseStyle(%q) = %+v, want no style", bad, got)
+		}
+	}
 	for _, c := range fx.Strip {
 		if got := StripHighlights(c.In); got != c.Out {
 			t.Errorf("StripHighlights(%q) = %q, want %q", c.In, got, c.Out)

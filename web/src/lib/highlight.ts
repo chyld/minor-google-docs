@@ -33,15 +33,21 @@ const STYLE_SET = new Set(HL_STYLE_NAMES);
 export const isStyleName = (s: string) => STYLE_SET.has(s);
 export const NO_STYLE: Style = { color: null, b: false, u: false };
 
+const parsed = new Map<string, Style>();
+
 /** The parts of a style name (null or an unknown name: no style). */
 export function parseStyle(name: string | null): Style {
   if (!name || !STYLE_SET.has(name)) return NO_STYLE;
+  const hit = parsed.get(name);
+  if (hit) return hit;
   const parts = name.split('+');
   let i = 0;
   const color = NAME_SET.has(parts[0]) ? parts[i++] : null;
   const b = parts[i] === 'b' ? (i++, true) : false;
   const u = parts[i] === 'u';
-  return { color, b, u };
+  const st = { color, b, u };
+  parsed.set(name, st);
+  return st;
 }
 
 /** The canonical name of a style, or null for no style at all. */

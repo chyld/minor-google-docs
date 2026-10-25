@@ -20,7 +20,7 @@ import {
 } from '@codemirror/state';
 import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import { isolateHistory } from '@codemirror/commands';
-import { hlDeep, hlHue, lineRuns, parseLine, parseStyle, restyle, serialize, stripHighlights, writeLine, type Hl, type Style } from '../highlight';
+import { hlDeep, hlHue, lineRuns, parseLine, parseStyle, pieces, restyle, serialize, styleName, stripHighlights, writeLine, type Hl, type Style } from '../highlight';
 import { MARKER_RE } from '../ids';
 import { headingSlice, isHeadingLine, stripSections } from '../heading';
 import { imageOp, isImageLine } from './images';
@@ -495,7 +495,7 @@ export type Coverage = 'all' | 'some' | 'none';
 
 /** The ranges a style edit touches: per text line (images and section headings skipped), as plain
  * offsets. With just a cursor, the whole text of the highlight it is in (untrimmed). */
-function targets(state: EditorState): { line: Line; runs: ReturnType<typeof lineRuns>; ps: number; pe: number; cursor: boolean }[] {
+function targets(state: EditorState, limit = Infinity): { line: Line; runs: ReturnType<typeof lineRuns>; ps: number; pe: number; cursor: boolean }[] {
   let { from, to } = state.selection.main;
   let cursor = false;
   if (from === to) {
@@ -506,8 +506,10 @@ function targets(state: EditorState): { line: Line; runs: ReturnType<typeof line
     cursor = true;
   }
   const out = [];
-  for (let pos = from; pos <= to; ) {
+  let seen = 0;
+  for (let pos = from; pos <= to && seen <= limit; ) {
     const line = state.doc.lineAt(pos);
+    seen += line.length;
     const a = Math.max(from, line.from) - line.from;
     const b = Math.min(to, line.to) - line.from;
     pos = line.to + 1;
@@ -518,17 +520,32 @@ function targets(state: EditorState): { line: Line; runs: ReturnType<typeof line
   return out;
 }
 
-/** Bold / underline / colour over the selection's visible (non-whitespace) characters. */
-export function styleState(state: EditorState): { bold: Coverage; underline: Coverage; hasColor: boolean; styled: boolean; color: string | null; any: boolean } {
+/** Bold / underline / colour over the selection's characters that can carry a style: not
+ * whitespace, and not the "=" a highlight can never contain ("==" inside, "=" at its end — see
+ * pieces()), so a toggle over "a == b" can still be switched off. Scanning stops after `limit`
+ * characters of line text (then exact is false and the coverage is a guess). */
+export function styleState(state: EditorState, limit = Infinity) {
   let n = 0;
   let nb = 0;
   let nu = 0;
   let colored = 0;
   let styled = 0;
+  let scanned = 0;
+  let exact = true;
   const colors = new Set<string | null>();
-  for (const t of targets(state)) {
+  for (const t of targets(state, limit)) {
+    scanned += t.runs.plain.length;
+    if (scanned > limit) {
+      exact = false;
+      break;
+    }
+    // the characters a style could actually be written on, if all of the range had it
+    const hyp = t.runs.colors.slice();
+    for (let i = t.ps; i < t.pe; i++) hyp[i] = styleName({ ...parseStyle(hyp[i]), b: true }) ?? 'b';
+    const writable = new Uint8Array(t.runs.plain.length);
+    for (const p of pieces(t.runs.plain, hyp)) writable.fill(1, p.s, p.e);
     for (let i = t.ps; i < t.pe; i++) {
-      if (/\s/.test(t.runs.plain[i])) continue;
+      if (!writable[i]) continue;
       const st = parseStyle(t.runs.colors[i]);
       n++;
       if (st.b) nb++;
@@ -538,9 +555,9 @@ export function styleState(state: EditorState): { bold: Coverage; underline: Cov
       colors.add(st.color);
     }
   }
-  const cov = (k: number): Coverage => (n && k === n ? 'all' : k ? 'some' : 'none');
-  const color = colors.size === 1 ? ([...colors][0] ?? null) : null;
-  return { bold: cov(nb), underline: cov(nu), hasColor: colored > 0, styled: styled > 0, color: colored === n ? color : null, any: n > 0 };
+  const cov = (k: number): Coverage => (!exact ? 'some' : n && k === n ? 'all' : k ? 'some' : 'none');
+  const color = exact && colors.size === 1 && colored === n ? ([...colors][0] ?? null) : null;
+  return { bold: cov(nb), underline: cov(nu), hasColor: colored > 0, styled: styled > 0 || !exact, color, any: n > 0 || !exact, exact };
 }
 
 export type StyleOp = { kind: 'color'; name: string | null } | { kind: 'toggle'; style: 'b' | 'u' } | { kind: 'clear' };
@@ -556,6 +573,8 @@ export function applyStyle(view: Pick<EditorView, 'state' | 'dispatch'>, op: Sty
   if (state.readOnly) return false;
   const ts = targets(state);
   if (!ts.length) return false;
+  const head = state.selection.main.empty ? state.selection.main.head : -1;
+  let caret: number | null = null;
   let fn: (s: Style) => Style;
   let adding: boolean;
   if (op.kind === 'color') {
@@ -576,19 +595,26 @@ export function applyStyle(view: Pick<EditorView, 'state' | 'dispatch'>, op: Sty
   let selTo = 0;
   let delta = 0;
   for (const t of ts) {
+    // a span of only spaces can't carry a new style (it would lose its delimiters): leave it
+    if (adding && t.cursor && !/\S/.test(t.runs.plain.slice(t.ps, t.pe))) continue;
     const res = restyle(t.runs, t.ps, t.pe, fn, adding && !t.cursor);
     if (!res) continue;
     if (res.text !== t.line.text) changes.push({ from: t.line.from, to: t.line.to, insert: res.text });
     const base = t.line.from + delta;
     selFrom ??= base + res.after[res.ps];
     selTo = base + res.before[res.pe];
+    if (head >= t.line.from && head <= t.line.to) {
+      // a bare cursor keeps its place in the text (inside the span), not the rewritten line's start
+      const k = t.runs.toPlain(head - t.line.from);
+      caret = base + (k <= res.ps ? res.after[k] : res.before[k]);
+    }
     delta += res.text.length - t.line.text.length;
   }
   if (selFrom === null) return false;
   if (!changes.length && state.selection.main.empty) return true;
   view.dispatch({
     changes,
-    selection: state.selection.main.empty ? undefined : EditorSelection.single(selFrom, selTo),
+    selection: state.selection.main.empty ? (caret === null ? undefined : EditorSelection.cursor(caret)) : EditorSelection.single(selFrom, selTo),
     annotations: [highlightOp.of(true), isolateHistory.of('full')],
     userEvent: 'input.highlight',
     scrollIntoView: true,

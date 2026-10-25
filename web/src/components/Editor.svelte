@@ -17,6 +17,7 @@
   interface Props {
     readonly?: boolean;
     raw?: boolean; // show and edit the stored text as-is: no images, colours or title styling
+    styles?: boolean; // a formatting menu is showing: report bold/underline state
     onchange: (text: string) => void;
     onfiles: (files: File[], at: 'cursor' | number) => void;
     onsave: () => void;
@@ -27,7 +28,7 @@
     onsections?: (list: SectionInfo[]) => void;
   }
 
-  let { readonly = false, raw = false, onchange, onfiles, onsave, onblur, onselection, onhighlightkey, onsections }: Props = $props();
+  let { readonly = false, raw = false, styles = false, onchange, onfiles, onsave, onblur, onselection, onhighlightkey, onsections }: Props = $props();
   let dragging = false;
 
   let host: HTMLDivElement;
@@ -75,8 +76,9 @@
           { key: 'Mod-Shift-h', preventDefault: true, run: () => (onhighlightkey?.(), true) },
           // bold / underline (SPEC §19): always swallowed in the editor, so the browser's own
           // Ctrl+B (bookmarks) / Ctrl+U (view source) never fire; nothing to do in raw or read-only
-          { key: 'Mod-b', preventDefault: true, run: (v) => (v.composing ? false : (formatKey(v, 'b'), true)) },
-          { key: 'Mod-u', preventDefault: true, run: (v) => (v.composing ? false : (formatKey(v, 'u'), true)) },
+          // (while an input method is composing they do nothing, but are still swallowed)
+          { key: 'Mod-b', preventDefault: true, run: (v) => (v.composing || formatKey(v, 'b'), true) },
+          { key: 'Mod-u', preventDefault: true, run: (v) => (v.composing || formatKey(v, 'u'), true) },
         ]),
       ),
       rich.of(richExtensions()),
@@ -193,9 +195,13 @@
     applyStyle(v, { kind: 'toggle', style });
   }
 
-  // the bold/underline state is exact for selections up to this size (computing it for a whole
-  // large note on every cursor move would be slow); beyond it the buttons show "some"
-  const STATE_LIMIT = 50_000;
+  // The bold/underline state is worked out only while a formatting menu shows it (the parent sets
+  // `styles`), and only over this much line text; beyond it the B/U buttons show "mixed".
+  const STATE_LIMIT = 200_000;
+  $effect(() => {
+    void styles;
+    untrack(() => report());
+  });
 
   function highlightInfo(): HighlightInfo {
     const none: HighlightInfo = { can: false, empty: true, current: null, focused: false, dragging, rect: null, bold: 'none', underline: 'none', hasColor: false, styled: false };
@@ -204,18 +210,24 @@
     const focused = view.hasFocus;
     if (st.readOnly || raw || selectedImage(st)) return { ...none, focused };
     const r = st.selection.main;
-    for (let pos = r.from; pos <= r.to; ) {
-      const l = st.doc.lineAt(pos);
-      if (isHeadingLine(l.text)) return { ...none, focused }; // section headings take no highlights
-      pos = l.to + 1;
-    }
     const h = highlightAt(st);
-    const big = r.to - r.from > STATE_LIMIT;
-    const ss = big ? { bold: 'some' as const, underline: 'some' as const, hasColor: true, styled: true, color: null } : styleState(st);
-    const styles = { bold: ss.bold, underline: ss.underline, hasColor: ss.hasColor, styled: ss.styled, current: ss.color };
-    if (r.empty) return { ...none, ...styles, can: !!h, focused };
+    // something formattable: a cursor in a highlight, or a selection with text outside headings/images
+    let can = r.empty ? !!h : false;
+    if (!r.empty) {
+      for (let pos = r.from; pos <= r.to && !can; ) {
+        const l = st.doc.lineAt(pos);
+        if (!isHeadingLine(l.text) && !MARKER_RE.test(l.text) && Math.min(r.to, l.to) > Math.max(r.from, l.from)) can = true;
+        pos = l.to + 1;
+      }
+    }
+    let state = {};
+    if (can && untrack(() => styles)) {
+      const ss = styleState(st, STATE_LIMIT);
+      state = { bold: ss.bold, underline: ss.underline, hasColor: ss.hasColor, styled: ss.styled, current: ss.color };
+    }
+    if (r.empty) return { ...none, ...state, can, focused };
     const c = view.coordsAtPos(r.from, 1);
-    return { ...styles, can: true, empty: false, focused, dragging, rect: c ? { left: c.left, top: c.top, bottom: c.bottom } : null };
+    return { ...none, ...state, can, empty: false, focused, dragging, rect: c ? { left: c.left, top: c.top, bottom: c.bottom } : null };
   }
 
   // ---- sections ----

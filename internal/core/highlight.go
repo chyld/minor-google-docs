@@ -45,9 +45,21 @@ type Style struct {
 	B, U  bool
 }
 
-// ParseStyle splits a valid highlight name into its parts.
+var styleSet = func() map[string]bool {
+	m := map[string]bool{}
+	for _, n := range HighlightStyleNames {
+		m[n] = true
+	}
+	return m
+}()
+
+// ParseStyle splits a highlight name into its parts; anything but one of the 99
+// style names is no style (as in the editor).
 func ParseStyle(name string) Style {
 	var st Style
+	if !styleSet[name] {
+		return st
+	}
 	parts := strings.Split(name, "+")
 	i := 0
 	if colorSet[parts[0]] {

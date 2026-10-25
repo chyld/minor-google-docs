@@ -351,10 +351,14 @@
   }
 
   /** Bold / underline / clear. The grid stays open after a toggle, so B then U works in one go. */
-  function format(op: StyleOp) {
-    editor.format(op, app.desktop);
+  function format(op: StyleOp, focus = app.desktop): boolean {
+    return editor.format(op, focus);
   }
-  const formatting = $derived({ bold: hl.bold, underline: hl.underline, hasColor: hl.hasColor, styled: hl.styled, onformat: format });
+  $effect(() => {
+    app.noteReadonly = readonly;
+  });
+  // from the grid, focus stays on its buttons (a keyboard user can press Bold, then Underline)
+  const formatting = $derived({ bold: hl.bold, underline: hl.underline, hasColor: hl.hasColor, styled: hl.styled, onformat: (op: StyleOp) => format(op, false) });
 
   function closeHighlightMenu() {
     hlMenu = null;
@@ -571,8 +575,7 @@
     const onSavePage = () => void saveAsPage();
     const onFormat = (e: Event) => {
       if (readonly || app.raw) return;
-      if (!hl.can) app.toast('Select some text first.', 'info');
-      else format((e as CustomEvent).detail as StyleOp);
+      if (!format((e as CustomEvent).detail as StyleOp)) app.toast('Select some text first.', 'info');
     };
     const onHide = () => {
       if (document.visibilityState === 'hidden') {
@@ -781,7 +784,7 @@
           <div class="note-skeleton" aria-hidden="true"><span></span><span></span><span></span></div>
         {/if}
         <div class:invisible={!note}>
-          <Editor bind:this={editor} raw={app.raw} onsections={onSections} {onchange} onfiles={handleFiles} onsave={saveNow} onblur={saveNow} onselection={onSelectionInfo} onhighlightkey={openHighlightMenu} />
+          <Editor bind:this={editor} raw={app.raw} styles={floatShown || hlMenu !== null} onsections={onSections} {onchange} onfiles={handleFiles} onsave={saveNow} onblur={saveNow} onselection={onSelectionInfo} onhighlightkey={openHighlightMenu} />
         </div>
         {#if note && hasText}
           <!-- end of the note: drawn, never part of the text -->
@@ -841,7 +844,7 @@
     {#if hlMenu === 'float'}
       <button class="menu-scrim" tabindex="-1" aria-hidden="true" onmousedown={(e) => e.preventDefault()} onclick={closeHighlightMenu}></button>
       <div class="hl-pop-float" style="left:{popPos.left}px; top:{popPos.top}px" bind:offsetWidth={popW} bind:offsetHeight={popH}>
-        <HighlightMenu current={hl.current} last={hlLast} onpick={pickHighlight} onclose={closeHighlightMenu} {formatting} />
+        <HighlightMenu current={hl.current} last={hlLast} onpick={pickHighlight} onclose={closeHighlightMenu} />
       </div>
     {/if}
   {/if}

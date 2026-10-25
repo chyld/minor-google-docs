@@ -50,6 +50,12 @@ func (s *Store) Reconcile(ctx context.Context) error {
 	}
 	rows.Close()
 
+	// titles, previews and the search index are derived from the text by rules that can
+	// change between versions (e.g. bold/underline made "=={b}…==" formatting): when they
+	// did, re-derive everything once even though no note changed
+	var stored string
+	s.DB.R.QueryRowContext(ctx, `SELECT value FROM settings WHERE key='derive_version'`).Scan(&stored)
+	rederive := stored != deriveVersion
 	repaired, reindexed := 0, 0
 	for _, n := range notes {
 		unlock := s.locks.Lock("note:" + n.id)
@@ -68,7 +74,7 @@ func (s *Store) Reconcile(ctx context.Context) error {
 			return err
 		}
 		sha := fsx.HashBytes(b)
-		if sha != n.sha {
+		if sha != n.sha || rederive {
 			body := string(b)
 			_, err := s.DB.W.ExecContext(ctx, `UPDATE notes SET title=?,preview=?,size_bytes=?,content_sha256=? WHERE id=?`,
 				DeriveTitle(body), DerivePreview(body), len(b), sha, n.id)
@@ -80,7 +86,7 @@ func (s *Store) Reconcile(ctx context.Context) error {
 			repaired++
 		}
 		unlock()
-		if indexed[n.id] != sha {
+		if indexed[n.id] != sha || rederive {
 			if err := s.indexNote(ctx, n.id); err != nil {
 				return err
 			}
@@ -139,6 +145,12 @@ func (s *Store) Reconcile(ctx context.Context) error {
 			s.Log.Warn("finishing interrupted purge", "note", g[1], "err", err)
 		}
 	}
+	if rederive {
+		if _, err := s.DB.W.ExecContext(ctx, `INSERT INTO settings(key,value) VALUES('derive_version',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, deriveVersion); err != nil {
+			return err
+		}
+		s.Log.Info("reconcile: titles, previews and search re-derived for this version", "notes", len(notes))
+	}
 	s.removePurgeLeftovers(ctx)
 	// a crash between a database change and its meta.json write leaves the mirror
 	// behind: bring every one up to date (unchanged files aren't rewritten)
@@ -168,6 +180,10 @@ func (s *Store) removePurgeLeftovers(ctx context.Context) {
 		}
 	}
 }
+
+// deriveVersion names the rules titles, previews and search text are derived with.
+// Bump it whenever those rules change, so reconcile re-derives every note once.
+const deriveVersion = "2" // 2: bold and underline (style-set highlight names)
 
 // RunJanitor performs periodic maintenance until ctx is cancelled.
 func (s *Store) RunJanitor(ctx context.Context, every time.Duration, extra func()) {

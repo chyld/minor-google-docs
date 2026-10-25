@@ -500,3 +500,27 @@ func TestUploadGCFinishesMovedUpload(t *testing.T) {
 		t.Fatalf("upload lost: %v %+v", err, a)
 	}
 }
+
+// After an upgrade that changes how text is read, every note's title, preview and
+// search text are re-derived once, although no note changed.
+func TestReconcileRederivesOnNewRules(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	u := newUser(t, s, "alice")
+	n, _ := s.CreateNote(ctx, u.ID, "=={b}Plan== for monday\nbody")
+	// as an older version left it: the markup in the title, an old rules version
+	s.DB.W.Exec(`UPDATE notes SET title=? WHERE id=?`, "=={b}Plan== for monday", n.ID)
+	s.DB.W.Exec(`DELETE FROM settings WHERE key='derive_version'`)
+	if err := s.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	m, _ := s.GetNote(ctx, u.ID, n.ID)
+	if m.Title != "Plan for monday" {
+		t.Fatalf("title not re-derived: %q", m.Title)
+	}
+	var v string
+	s.DB.R.QueryRow(`SELECT value FROM settings WHERE key='derive_version'`).Scan(&v)
+	if v != deriveVersion {
+		t.Fatalf("version %q", v)
+	}
+}

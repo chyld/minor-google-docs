@@ -15,6 +15,8 @@
     download: 'M12 4v11M7 10l5 5 5-5M5 20h14',
     page: 'M7 3h7l5 5v13H7zM14 3v5h5M9.5 13h7M9.5 16.5h5',
     'clear-format': 'M6 5h12M12 5l-3 14M4 20l16-16',
+    bold: 'M7 5h6a3.5 3.5 0 0 1 0 7H7zM7 12h7a3.5 3.5 0 0 1 0 7H7z',
+    underline: 'M7 4v7a5 5 0 0 0 10 0V4M5 20h14',
     x: 'M6 6l12 12M18 6L6 18',
     more: 'M5 12h.01M12 12h.01M19 12h.01',
     copy: 'M9 9h10v10H9zM5 15V5h10',

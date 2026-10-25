@@ -420,6 +420,36 @@
       "color": "pink-deep",
       "b": false,
       "u": true
+    },
+    {
+      "name": "coral+u",
+      "color": "coral",
+      "b": false,
+      "u": true
+    },
+    {
+      "name": "coral+b+u",
+      "color": "coral",
+      "b": true,
+      "u": true
+    },
+    {
+      "name": "coral-deep",
+      "color": "coral-deep",
+      "b": false,
+      "u": false
+    },
+    {
+      "name": "coral-deep+b",
+      "color": "coral-deep",
+      "b": true,
+      "u": false
+    },
+    {
+      "name": "coral-deep+b+u",
+      "color": "coral-deep",
+      "b": true,
+      "u": true
     }
   ]
 }

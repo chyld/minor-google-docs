@@ -50,6 +50,8 @@ class AppState {
 
   paletteOpen = $state(false);
   accountOpen = $state(false);
+  /** The open note is read-only (trashed): the palette hides editing commands. */
+  noteReadonly = $state(false);
   /** Start "Check my notes" as soon as Account & data opens (from the palette). */
   checkOnOpen = $state(false);
   shortcutsOpen = $state(false);

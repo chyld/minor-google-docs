@@ -92,6 +92,45 @@ await page.keyboard.press('Control+z');
 await settle();
 check('one undo step takes it back', (await doc()).includes('\nsecond line here'), await doc());
 
+// a bare cursor stays in the text: Ctrl+B, then typing lands inside the (now bold) word
+{
+  const d = await doc();
+  const at = d.indexOf('second') + 3;
+  await page.evaluate((at) => (__v.focus(), __v.dispatch({ selection: { anchor: at }, userEvent: 'select' })), at);
+  await page.keyboard.type('~'); // "sec~ond" is plain text: no span yet
+  await page.keyboard.press('Control+z');
+  await select('second');
+  await page.keyboard.press('Control+b');
+  const d2 = await doc();
+  const mid = d2.indexOf('second') + 3;
+  await page.evaluate((mid) => __v.dispatch({ selection: { anchor: mid }, userEvent: 'select' }), mid);
+  await page.keyboard.press('Control+u');
+  await page.keyboard.type('X');
+  await settle();
+  check('with just the cursor, Ctrl+U adds to the span and typing stays inside it', (await doc()).includes('=={b+u}secXond=='), await doc());
+  await page.keyboard.press('Control+z');
+  await page.keyboard.press('Control+z');
+  await page.keyboard.press('Control+z');
+  await settle();
+}
+
+// keyboard in the highlighter grid: Bold, then Underline, without leaving the menu
+await select('second');
+await page.click('.note-bar button[aria-label="Highlight"]');
+await settle();
+await page.focus('.hl-menu button[aria-label="Bold"]');
+await page.keyboard.press('Enter');
+await settle();
+const still = await page.evaluate(() => !!document.activeElement?.closest('.hl-menu'));
+await page.focus('.hl-menu button[aria-label="Underline"]');
+await page.keyboard.press(' ');
+await settle();
+check('in the grid, Bold then Underline by keyboard, focus staying in the menu', still && (await doc()).includes('=={b+u}second=='), await doc());
+await page.keyboard.press('Escape');
+await page.keyboard.press('Control+z');
+await page.keyboard.press('Control+z');
+await settle();
+
 // the title line stays the title's weight when bold
 await select('Format');
 await page.keyboard.press('Control+b');

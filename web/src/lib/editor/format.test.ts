@@ -1,10 +1,10 @@
 // Bold and underline: a highlight's style set (SPEC §19).
 import { describe, expect, it } from 'vitest';
-import { EditorSelection, EditorState } from '@codemirror/state';
+import { EditorSelection, EditorState, type TransactionSpec } from '@codemirror/state';
 import { history, undo } from '@codemirror/commands';
 import { markers } from './markers';
 import { imageEditing } from './images';
-import { applyStyle, highlights, styleState, type StyleOp } from './highlights';
+import { applyStyle, cleanSlice, highlightAt, highlights, styleState, type StyleOp } from './highlights';
 import { stripHighlights } from '../highlight';
 
 const IMG = '[image:aaaaaaaaaa] one.png';
@@ -108,3 +108,76 @@ describe('bold and underline', () => {
     expect(run(s, B).done).toBe(false);
   });
 });
+
+describe('review fixes', () => {
+  it('a bare cursor keeps its place in the text, so Ctrl+B then Ctrl+U build one span', () => {
+    const d = 'T\nx =={coral}word== y';
+    const at = d.indexOf('word') + 2; // between "wo" and "rd"
+    const a = run(mk(d, at), B).s;
+    expect(a.doc.toString()).toBe('T\nx =={coral+b}word== y');
+    expect(a.sliceDoc(a.selection.main.head - 2, a.selection.main.head + 2)).toBe('word');
+    const b = run(a, U).s;
+    expect(b.doc.toString()).toBe('T\nx =={coral+b+u}word== y');
+    expect(highlightAt(b)?.name).toBe('coral+b+u');
+  });
+
+  it('text with "==" and a trailing "=" can be toggled on and off again', () => {
+    for (const text of ['a == b', 'x=']) {
+      const d = `T\n${text}`;
+      const on = run(mk(d, 2, d.length), B).s;
+      expect(styleState(on.update({ selection: { anchor: 2, head: on.doc.length } }).state).bold).toBe('all');
+      const off = run(on.update({ selection: { anchor: 2, head: on.doc.length } }).state, B).s;
+      expect(off.doc.toString()).toBe(d);
+    }
+  });
+
+  it('a selection across a section heading formats the text around it', () => {
+    const d = 'T\none\n## {teal} Head\ntwo';
+    const s = run(mk(d, d.indexOf('one'), d.length), B).s;
+    expect(s.doc.toString()).toBe('T\n=={b}one==\n## {teal} Head\n=={b}two==');
+  });
+
+  it('picking a colour with the cursor in a span of only spaces leaves it alone', () => {
+    const d = 'T\nx =={coral} == y';
+    const s = run(mk(d, d.indexOf('} ') + 2), { kind: 'color', name: 'sky' }).s;
+    expect(s.doc.toString()).toBe(d);
+  });
+
+  it('a scan limit gives "mixed", never invented colours', () => {
+    const big = 'T\n' + 'word '.repeat(20);
+    const st = styleState(mk(big, 2, big.length), 10);
+    expect(st).toMatchObject({ bold: 'some', exact: false });
+  });
+});
+
+// The existing edit rules hold for combined names (longer openers shift every offset).
+const apply = (s: EditorState, spec: TransactionSpec) => s.update(spec).state;
+const type = (s: EditorState, from: number, insert: string, to = from, userEvent = 'input.type') =>
+  apply(s, { changes: { from, to, insert }, selection: { anchor: from + insert.length }, userEvent });
+for (const name of ['b', 'coral+b', 'b+u', 'sky-deep+b+u']) {
+  describe(`edit rules with =={${name}}`, () => {
+    const d = `x =={${name}}abcd== y`;
+    const inner = d.indexOf('abcd');
+    it('Enter in the middle closes and reopens it', () => {
+      const s = type(mk(d, inner + 2), inner + 2, '\n', inner + 2, 'input');
+      expect(s.doc.toString()).toBe(`x =={${name}}ab==\n=={${name}}cd== y`);
+    });
+    it('Backspace on the closer unwraps it, keeping the text', () => {
+      const end = inner + 4 + 2;
+      expect(apply(mk(d, end), { changes: { from: end - 1, to: end }, selection: { anchor: end - 1 }, userEvent: 'delete.backward' }).doc.toString()).toBe('x abcd y');
+    });
+    it('typing "==" inside splits it', () => {
+      let s = type(mk(d, inner + 2), inner + 2, '=');
+      s = type(s, s.selection.main.head, '=');
+      expect(stripHighlights(s.doc.toString())).toBe('x ab==cd y');
+      expect(s.doc.toString()).toBe(`x =={${name}}ab======{${name}}cd== y`);
+    });
+    it('replace-all never edits a delimiter', () => {
+      const changes = [...d.matchAll(/ab/g)].map((m) => ({ from: m.index!, to: m.index! + 2, insert: 'Z' }));
+      expect(apply(mk(d), { changes, userEvent: 'input.replace.all' }).doc.toString()).toBe(`x =={${name}}Zcd== y`);
+    });
+    it('copying part of it gives plain text, and balanced raw text for this app', () => {
+      expect(cleanSlice(mk(d), inner + 2, d.length)).toEqual({ plain: 'cd y', raw: `=={${name}}cd== y` });
+    });
+  });
+}

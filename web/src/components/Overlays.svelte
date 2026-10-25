@@ -13,7 +13,7 @@
     ['Ctrl F', 'Find in note'],
     ['Alt T', 'Insert current date & time'],
     ['Ctrl ⇧ H', 'Highlight the selection (Enter repeats the last colour)'],
-    ['Ctrl B / Ctrl U', 'Bold / underline the selection'],
+    ['Ctrl B / Ctrl U', 'Bold / underline the selection (⌘ on a Mac)'],
     ['Ctrl V', 'Paste a screenshot into the note'],
     ['Ctrl /', 'Raw text / rendered note'],
     ['Ctrl ⇧ F', 'Focus mode'],
