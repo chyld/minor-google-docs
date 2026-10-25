@@ -634,7 +634,7 @@ note's images, zoom-to-fit) · range downloads.
 - **Login:** single card on a gradient mesh, no sign-up link; if no users exist, shows the
   `notes user add` command.
 - **Keyboard:** Ctrl+K palette, Alt+N new (browsers reserve Ctrl+N), Ctrl+S save now,
-  Ctrl+\ sidebar rail, Ctrl+Shift+\ notes list, Ctrl+Shift+F focus mode, Ctrl+Shift+H highlight, Ctrl+/ raw text, `/` search, `?` cheat sheet (outside
+  Ctrl+\ sidebar rail, Ctrl+Shift+\ notes list, Ctrl+Shift+F focus mode, Ctrl+Shift+H highlight, Ctrl+B / Ctrl+U bold / underline, Ctrl+/ raw text, `/` search, `?` cheat sheet (outside
   text fields). `c` (new note) and `j`/`k`/Enter only while the note list has focus.
 - **Accessibility:** visible focus rings, WCAG AA contrast, state never by color alone,
   `aria-live` save status, 40 px touch targets, 16 px inputs (no iOS zoom).
@@ -824,7 +824,8 @@ of the new names literally (e.g. text about this syntax) is read as formatted si
   its non-whitespace extent; parts of other highlights are split (outside parts keep their colour);
   touching same-colour runs merge; idempotent. With just a cursor in a highlight's text (not merely
   next to it): recolour/remove it.
-  Image lines, blank lines and read-only notes are skipped. Afterwards the coloured text is selected.
+  Image lines, blank lines and read-only notes are skipped. Afterwards the coloured text is selected
+  (with just a cursor, the cursor stays between the same two characters).
 - **Bold and underline** (`applyStyle`, one undo step): **toggle** — decided once for the whole
   selection over its visible characters (images and headings skipped): if all have it, it comes off
   everywhere, otherwise it goes on everywhere; trimmed to the non-whitespace extent when adding, never
@@ -872,7 +873,8 @@ of the new names literally (e.g. text about this syntax) is read as formatted si
 
 Tests: `internal/core` (fixture, titles/previews), `web/src/lib/highlight.test.ts` (grammar, round-trip
 property, contrast), `web/src/lib/editor/highlights.test.ts` (apply/remove, edit rules, clipboard),
-`web/e2e/highlights.mjs` (browser).
+`web/e2e/highlights.mjs` (browser); bold/underline: `web/src/lib/editor/format.test.ts` (toggles, cursor,
+`==`, edit rules with combined names), `web/e2e/format.mjs` (browser, incl. a Firefox shortcut check).
 
 ## 20. Raw text view
 
@@ -892,7 +894,7 @@ lines, `=={name}…==` delimiters and the title line are plain, editable text.
   just text again in the rendered view. But search-and-replace never rewrites an `[image:ref]` or a
   highlight's delimiters (a replace-all would cut images loose; captions and highlighted text are fine),
   and text copied in the rendered view pastes with its highlights (`text/x-notes-raw`).
-- **No colour tools.** The highlight button, floating bar and Ctrl+Shift+H do nothing in raw mode;
+- **No colour tools.** The highlight button, floating bar, Ctrl+Shift+H and Ctrl+B / Ctrl+U do nothing in raw mode;
   switching with the colours open (or focus on their button) closes them and returns focus to the note. Pasted or dropped images
   still upload and insert their marker line. Footer counts include the delimiters (what is on screen).
 - **Shortcut.** Ctrl+/ goes by the character typed (`e.key === '/'`), so it follows the layout (Ctrl+Shift+7

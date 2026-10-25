@@ -70,7 +70,7 @@
       <button class="hl-fmt fmt-btn-b" title="Bold (Ctrl+B)" aria-label="Bold" aria-pressed={pressed(formatting.bold)} onclick={() => formatting.onformat({ kind: 'toggle', style: 'b' })}><b>B</b></button>
       <button class="hl-fmt fmt-btn-u" title="Underline (Ctrl+U)" aria-label="Underline" aria-pressed={pressed(formatting.underline)} onclick={() => formatting.onformat({ kind: 'toggle', style: 'u' })}><u>U</u></button>
       {#if formatting.styled}
-        <button class="hl-remove" onclick={() => formatting.onformat({ kind: 'clear' })}><Icon name="x" size={14} /> Clear formatting</button>
+        <button class="hl-remove" onclick={() => formatting.onformat({ kind: 'clear' })}><Icon name="clear-format" size={14} /> Clear formatting</button>
       {/if}
     </div>
     {#if formatting.hasColor}

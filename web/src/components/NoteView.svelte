@@ -357,6 +357,17 @@
   $effect(() => {
     app.noteReadonly = readonly;
   });
+  // Esc closes the colour menu even when the editor has focus (a click on Bold keeps it there)
+  $effect(() => {
+    if (!hlMenu) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
+      e.preventDefault();
+      closeHighlightMenu();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
   // from the grid, focus stays on its buttons (a keyboard user can press Bold, then Underline)
   const formatting = $derived({ bold: hl.bold, underline: hl.underline, hasColor: hl.hasColor, styled: hl.styled, onformat: (op: StyleOp) => format(op, false) });
 

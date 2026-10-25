@@ -131,6 +131,18 @@ await page.keyboard.press('Control+z');
 await page.keyboard.press('Control+z');
 await settle();
 
+// desktop: click Bold in the note-bar menu, then Esc closes it
+await select('second');
+await page.click('.note-bar button[aria-label="Highlight"]');
+await settle();
+await page.click('.hl-pop-bar button[aria-label="Bold"]');
+await settle();
+await page.keyboard.press('Escape');
+await settle();
+check('after clicking Bold, Esc still closes the menu', !(await shown('.hl-pop-bar')));
+await page.keyboard.press('Control+z');
+await settle();
+
 // the title line stays the title's weight when bold
 await select('Format');
 await page.keyboard.press('Control+b');
