@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf16"
@@ -116,8 +117,8 @@ func (p *Page) Filename() string { return safeName(p.Title) + ".html" }
 // WriteTo writes the page. Any error after the first byte means the output is
 // incomplete: the caller must abort the response, never end it normally.
 func (p *Page) WriteTo(w io.Writer) (int64, error) {
-	if pageBeforeWrite != nil {
-		pageBeforeWrite(p)
+	if hook := pageBeforeWrite.Load(); hook != nil {
+		(*hook)(p)
 	}
 	files := map[int]*os.File{}
 	defer func() {
@@ -133,7 +134,7 @@ func (p *Page) WriteTo(w io.Writer) (int64, error) {
 }
 
 // pageBeforeWrite lets tests change files between the snapshot and the write.
-var pageBeforeWrite func(*Page)
+var pageBeforeWrite atomic.Pointer[func(*Page)]
 
 // PageCSP is the content security policy of every page (also sent as a header).
 func PageCSP() string {

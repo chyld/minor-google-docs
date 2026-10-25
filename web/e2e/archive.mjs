@@ -76,7 +76,7 @@ check('the palette downloads it too', viaPalette.name === `Rack ${tag}.tar.gz`, 
 }
 await api('PATCH', `/api/notes/${id}`, { trashed: true });
 await open(id);
-check('a trashed note has no archive button', !(await page.isVisible('button[aria-label*="tar.gz"]')) && !(await page.isVisible('button[aria-label="More actions"]')));
+check('a trashed note has no ⋯ menu, so no "Download as .tar.gz"', !(await page.isVisible('button[aria-label="More actions"]')) && !(await page.isVisible('text=Download as .tar.gz')));
 await page.keyboard.press('Control+k');
 await page.keyboard.type('tar.gz');
 await page.waitForTimeout(200);

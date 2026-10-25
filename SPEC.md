@@ -543,9 +543,20 @@ note's folder, file, tags with their colours, pins, dates and images (ref, name,
 import reads, so old and new zips both import. Importing keeps an image's ref when it is free, or
 when the same ref already holds the same content (a copy); otherwise it picks a new ref and
 rewrites the marker. A single note can be downloaded as a `.tar.gz` in the same layout (§24);
-`notes import` takes that too, unpacking it into a new folder under `data/tmp/` first (folders
-and regular files only, every name a plain relative path, written through `os.Root`; links and
-devices skipped; the folder is removed afterwards).
+`notes import` takes that too (also `.tgz`), unpacking it into a new folder under
+`data/tmp/import/` first: folders and regular files only, every name a plain relative path
+(`a/b`: no `..`, `.`, empty part or backslash), each name once, written through `os.Root`; links
+and devices skipped, sparse files refused, at most 100,000 entries; written through the
+free-space guard like an upload (`NOTES_MIN_FREE`), so an archive that unpacks to more than the
+disk can spare stops early; the gzip checksum is read to the end, so a damaged or cut-off archive
+is refused; Ctrl-C stops it. The folder is removed afterwards (the janitor removes one a killed
+import left, after a day; `doctor` leaves it alone). A `.tar.gz` must hold `manifest.json`:
+a `notes backup` is refused rather than turned into a note per `.txt` inside it.
+
+Every import first checks that each note's text and listed file is there, so a broken export
+creates nothing. Text is imported as the app would save it (`cleanPageText`: LF, valid UTF-8, no
+NUL) before markers are matched, so a note.txt that an editor or a damaged disk changed still
+imports and its markers still follow remapped refs.
 
 ### Config (env)
 
@@ -1152,8 +1163,9 @@ big.
   - **`meta.json`** is built from the same inventory (not reread from disk), so it never names a
     file the archive doesn't have.
   - **`MISSING.txt`** names, for people, the files missing on the server: an unreadable file, or
-    an image the text shows that exists nowhere (by its caption), with its marker, and points to
-    Check my notes. An own file replaced by another note's copy isn't listed.
+    an image the text shows that exists nowhere (by its caption), and points to Check my notes.
+    Images the text shows get their marker (`[image:…]`, as in the text); other files just their
+    name. An own file replaced by another note's copy isn't listed.
   - Names: `safeName` for the folder, the export's file-name rules (`exportFileName`: Windows-unsafe
     characters → `_`, reserved names prefixed) and case-insensitive de-duplication across own and
     borrowed files (`name (2).png`, `uniqueFileName`, shared with the export), plus a **byte** cap
@@ -1180,15 +1192,22 @@ big.
   - The full export's output is unchanged; only `uniqueFileName` and the manifest types are shared.
 - **Handler:** `GET /api/notes/{id}/archive` (the mux answers `HEAD` too), behind `requireUser` and
   `crossSite` (only absent, `same-origin` or `none`). `?check=1` does the whole preparation and
-  answers `{"missing": n}` or the error, so the client can show the server's message.
+  answers `{"missing": n}` or the error, so the client can show the server's message; `HEAD` and
+  `GET` send the count as `X-Notes-Missing`. The upload-running message is the archive's own
+  ("…the archive includes every file"); the page keeps "…the page includes every file".
 - **Client** (one `download` helper in `NoteView.svelte` for the page and the archive, each with its
   own words): remember the note; save first; refuse on unsaved changes, a conflict, a save error or
-  an upload in progress ("…the archive includes every file"); `?check=1`; check again; start the
-  download through the browser (`startDownload`: streamed to disk, never held in memory). When
-  files are missing, a toast: "N files are missing on the server: see MISSING.txt in the archive."
-  The 409 upload message is now neutral ("…the download includes every file").
+  an upload in progress ("…the archive includes every file"); `?check=1` (the server's message
+  if it can't be made); check again; `HEAD` just before (as the page does: an error there asks
+  `?check=1` for its message, never saves it as the archive), then start the download through
+  the browser (`startDownload`: streamed to disk, never held in memory). When the `HEAD` reports
+  missing files, a toast: "N files are missing on the server: see MISSING.txt in the archive."
 - **Import:** `notes import <user> note.tar.gz` (also `.tgz`) unpacks safely (§9.3) and imports
   as an export: a new note with text, tags, pin, dates and files; markers remapped if needed.
+- **Code review** (team beta, 8 of 8) found, besides the archive's own fixes above, that every CLI
+  import and `doctor --fix` restore hung: a save held the note lock while the CLI's on-the-spot
+  indexing (`SyncIndex`) took it again. Saves and restores now index after releasing it (a test
+  imports with `SyncIndex` on). The test hooks are atomic (`go test -race` passes).
 - **Tests:** `internal/core/notearchive_test.go` (entries and names, raw text, borrowed and missing
   files, manifest and meta, import round trip incl. a remapped ref, refusals: other user, trashed,
   upload running, symlinked and FIFO `note.txt`; a file deleted, grown, shrunk, replaced or

@@ -73,8 +73,8 @@ func (s *Store) Doctor(ctx context.Context, fix bool) (*DoctorReport, error) {
 	}
 	tmpDirs, _ := os.ReadDir(filepath.Join(s.Dir, "tmp"))
 	for _, d := range tmpDirs {
-		if !d.IsDir() {
-			continue
+		if !d.IsDir() || d.Name() == "import" {
+			continue // tmp/import/: a `notes import` unpacking (the janitor removes leftovers)
 		}
 		files, _ := os.ReadDir(filepath.Join(s.Dir, "tmp", d.Name()))
 		for _, f := range files {
@@ -376,6 +376,14 @@ func (s *Store) hasNoteFolders(uid string) bool {
 // purged meanwhile (an interrupted purge must not be resurrected), or saved
 // meanwhile (the check ran before the lock was taken).
 func (s *Store) restoreNoteText(ctx context.Context, uid, id string, body []byte) bool {
+	if !s.restoreNoteTextLocked(ctx, uid, id, body) {
+		return false
+	}
+	s.enqueueIndex(id) // after the lock: indexing takes it too, and the CLI indexes on the spot
+	return true
+}
+
+func (s *Store) restoreNoteTextLocked(ctx context.Context, uid, id string, body []byte) bool {
 	unlock := s.locks.Lock("note:" + id)
 	defer unlock()
 	if !s.exists(ctx, `SELECT 1 FROM notes WHERE id=? AND user_id=? AND trashed_at IS NULL`, id, uid) {
@@ -393,7 +401,6 @@ func (s *Store) restoreNoteText(ctx context.Context, uid, id string, body []byte
 	text := string(body)
 	s.DB.W.ExecContext(ctx, `UPDATE notes SET title=?,preview=?,size_bytes=?,content_sha256=? WHERE id=? AND user_id=?`,
 		DeriveTitle(text), DerivePreview(text), len(body), fsx.HashBytes(body), id, uid)
-	s.enqueueIndex(id)
 	s.writeMeta(ctx, uid, id)
 	return true
 }

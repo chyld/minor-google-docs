@@ -181,6 +181,14 @@ func (s *Store) saveBody(ctx context.Context, uid, id, body, base string) (*Save
 	if err != nil {
 		return nil, err
 	}
+	// the index is updated after the lock is released: indexing takes the same lock,
+	// and the CLI indexes on the spot (SyncIndex)
+	reindex := false
+	defer func() {
+		if reindex {
+			s.enqueueIndex(id)
+		}
+	}()
 	unlock := s.locks.Lock("note:" + id)
 	defer unlock()
 
@@ -215,7 +223,7 @@ func (s *Store) saveBody(ctx context.Context, uid, id, body, base string) (*Save
 				res.Title, res.Preview, res.SizeBytes, sha, res.UpdatedAt, id, uid); err != nil {
 				return nil, err
 			}
-			s.enqueueIndex(id)
+			reindex = true
 			s.writeMeta(dbctx, uid, id)
 		}
 		return res, nil
@@ -244,7 +252,7 @@ func (s *Store) saveBody(ctx context.Context, uid, id, body, base string) (*Save
 		s.Log.Error("note row update failed after file write", "note", id, "err", err)
 		return nil, err
 	}
-	s.enqueueIndex(id)
+	reindex = true
 	s.writeMeta(dbctx, uid, id)
 	return res, nil
 }

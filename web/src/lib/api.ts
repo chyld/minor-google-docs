@@ -126,7 +126,19 @@ export function startDownload(url: string) {
 /** Starts a download of the signed-in user's export zip (one folder per note). */
 export const downloadExport = () => startDownload('/api/export');
 
-/** One note as a .tar.gz with all its files (SPEC §24). */
-export const archiveURL = (id: string) => `/api/notes/${id}/archive`;
+/** Starts a download of one note as a .tar.gz with all its files (SPEC §24) and returns how
+ * many files are missing on the server. A HEAD just before, so an error (note trashed or
+ * deleted, an upload started) is shown, never saved as the archive. */
+export async function downloadArchive(id: string): Promise<number> {
+  const url = `/api/notes/${id}/archive`;
+  const res = await fetch(url, { method: 'HEAD', headers: { 'X-Requested-With': 'notes' } });
+  if (!res.ok) {
+    // HEAD has no body: ask again for the message
+    await request('GET', `${url}?check=1`);
+    throw new ApiError(res.status, 'error', 'The archive could not be made. Try again.');
+  }
+  startDownload(url);
+  return Number(res.headers.get('X-Notes-Missing')) || 0;
+}
 
 export const attachmentURL = (id: string, download = false) => `/api/attachments/${id}${download ? '?download=1' : ''}`;

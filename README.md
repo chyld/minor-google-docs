@@ -94,7 +94,7 @@ from the page. It opens offline in any browser and prints cleanly.
 To keep a note's files, ⋯ → **Download as .tar.gz** gives one archive with the note's text and
 every image and attachment under its original name (trashed notes: restore them first). Files
 missing on the server are listed in `MISSING.txt` inside it. `notes import <user> note.tar.gz`
-brings the note back.
+brings the note back (it takes note archives only: a `notes backup` is restored as below).
 
 ### Restore
 

@@ -152,6 +152,7 @@ func (s *Store) Reconcile(ctx context.Context) error {
 		s.Log.Info("reconcile: titles, previews and search re-derived for this version", "notes", len(notes))
 	}
 	s.removePurgeLeftovers(ctx)
+	s.removeImportLeftovers()
 	// a crash between a database change and its meta.json write leaves the mirror
 	// behind: bring every one up to date (unchanged files aren't rewritten)
 	for _, n := range notes {
@@ -167,6 +168,17 @@ func (s *Store) Reconcile(ctx context.Context) error {
 		s.Log.Info("reconcile", "repaired", repaired, "reindexed", reindexed, "stray_tmp_removed", removed)
 	}
 	return nil
+}
+
+// removeImportLeftovers deletes what a killed `notes import` of a .tar.gz left in
+// tmp/import/ (a day old: no import is still reading it).
+func (s *Store) removeImportLeftovers() {
+	dirs, _ := os.ReadDir(filepath.Join(s.Dir, "tmp", "import"))
+	for _, d := range dirs {
+		if st, err := d.Info(); err == nil && time.Since(st.ModTime()) > 24*time.Hour {
+			os.RemoveAll(filepath.Join(s.Dir, "tmp", "import", d.Name()))
+		}
+	}
 }
 
 // removePurgeLeftovers deletes tmp/<uid>/purge-<id> folders whose note row is gone
@@ -243,6 +255,7 @@ func (s *Store) JanitorOnce(ctx context.Context) error {
 	errs = append(errs, err)
 	errs = append(errs, s.IndexSweep(ctx))
 	s.removePurgeLeftovers(ctx)
+	s.removeImportLeftovers()
 	errs = append(errs, s.DrainMeta(ctx))
 	s.runAllPending(ctx)
 	return errors.Join(errs...)

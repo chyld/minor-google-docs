@@ -160,7 +160,8 @@ func TestArchiveMissingFileStillImports(t *testing.T) {
 	a, got, _ := readArchive(t, s, u.ID, n.ID)
 	mn := archiveManifest(t, got)
 	if a.Missing != 1 || len(mn.Attachments) != 1 || mn.Attachments[0].Ref != keep.Ref || len(mn.Missing) != 1 ||
-		mn.Missing[0].Filename != "lost.bin" || mn.Missing[0].Reason != "unreadable" || !strings.Contains(string(got["MISSING.txt"]), "lost.bin") {
+		mn.Missing[0].Filename != "lost.bin" || mn.Missing[0].Reason != "unreadable" || !strings.Contains(string(got["MISSING.txt"]), "  lost.bin\n") ||
+		strings.Contains(string(got["MISSING.txt"]), "[image:") { // a file, not an image the text shows
 		t.Fatalf("missing %d, manifest %+v", a.Missing, mn)
 	}
 	path := writeArchiveFile(t, s, u.ID, n.ID)
@@ -291,7 +292,7 @@ func TestArchiveFileChanges(t *testing.T) {
 	data := bytes.Repeat([]byte("tar "), 4000)
 	a := uploadBytes(t, s, u.ID, n.ID, "a.bin", data)
 	path := s.attPath(u.ID, a)
-	defer func() { archiveBeforeWrite = nil }()
+	defer SetArchiveBeforeWriteForTest(nil)
 	for name, change := range map[string]func(){
 		"deleted": func() { os.Remove(path) },
 		"grown": func() {
@@ -313,7 +314,7 @@ func TestArchiveFileChanges(t *testing.T) {
 		os.Remove(path)
 		os.Remove(path + ".real")
 		os.WriteFile(path, data, 0o600)
-		archiveBeforeWrite = func(*NoteArchive) { change() }
+		SetArchiveBeforeWriteForTest(func(*NoteArchive) { change() })
 		ar, err := s.PrepareNoteArchive(ctx, u.ID, n.ID)
 		if err != nil {
 			t.Fatal(err)
@@ -325,7 +326,7 @@ func TestArchiveFileChanges(t *testing.T) {
 	// unchanged: fine
 	os.Remove(path)
 	os.WriteFile(path, data, 0o600)
-	archiveBeforeWrite = nil
+	SetArchiveBeforeWriteForTest(nil)
 	_, got, _ := readArchive(t, s, u.ID, n.ID)
 	if !bytes.Equal(got["notes/N/files/a.bin"], data) {
 		t.Fatal("bytes differ")
@@ -408,7 +409,225 @@ func TestImportTarGzSafety(t *testing.T) {
 	if _, err := os.Stat(outside); err == nil {
 		t.Fatal("wrote through a symlink")
 	}
-	if left, _ := filepath.Glob(filepath.Join(s.Dir, "tmp", "import-*")); len(left) != 0 {
+	if left, _ := filepath.Glob(filepath.Join(s.Dir, "tmp", "import", "*")); len(left) != 0 {
 		t.Fatalf("left behind: %v", left)
+	}
+}
+
+// The CLI indexes on the spot (SyncIndex): saving a note, and so importing one, must
+// not wait on the note lock it already holds.
+func TestImportWithSyncIndexDoesNotHang(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	a := newUser(t, s, "alice")
+	b := newUser(t, s, "bob")
+	n, _ := s.CreateNote(ctx, a.ID, "")
+	s.SaveBody(ctx, a.ID, n.ID, "Rack wiring", s.mustSHA(t, a.ID, n.ID))
+	path := writeArchiveFile(t, s, a.ID, n.ID)
+	s.SyncIndex = true
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.Import(ctx, b.ID, path)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("import hung (saving under the note lock indexes under it again)")
+	}
+	if l, _ := s.ListNotes(ctx, b.ID, ListParams{Q: "wiring"}); len(l.Items) != 1 {
+		t.Fatalf("not indexed: %+v", l.Items)
+	}
+}
+
+// Raw text an editor or a damaged disk left (CRLF, NUL, invalid UTF-8) is kept in the
+// archive but cleaned on import, so the archive imports and its markers still resolve.
+func TestArchiveRawTextImports(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	a := newUser(t, s, "alice")
+	b := newUser(t, s, "bob")
+	n, _ := s.CreateNote(ctx, a.ID, "")
+	img := uploadPNG(t, s, a.ID, n.ID, pngBytes)
+	s.SaveBody(ctx, a.ID, n.ID, "Raw\n[image:"+img.Ref+"]", s.mustSHA(t, a.ID, n.ID))
+	os.WriteFile(s.notePath(a.ID, n.ID), []byte("Raw\x00 \xff\r\n[image:"+img.Ref+"]\r\n"), 0o600)
+	// bob already uses the ref for other content: the marker must follow the new ref
+	bm, _ := s.CreateNote(ctx, b.ID, "")
+	s.importAttachment(ctx, b.ID, bm.ID, strings.NewReader("other"), "clash.bin", img.Ref)
+	if c, err := s.Import(ctx, b.ID, writeArchiveFile(t, s, a.ID, n.ID)); err != nil || c != 1 {
+		t.Fatalf("import: %d %v", c, err)
+	}
+	l, _ := s.ListNotes(ctx, b.ID, ListParams{})
+	var got *Note
+	for _, it := range l.Items {
+		if it.ID != bm.ID && strings.HasPrefix(it.Title, "Raw") {
+			got, _ = s.GetNote(ctx, b.ID, it.ID)
+		}
+	}
+	if got == nil || len(got.Attachments) != 1 || got.Body != "Raw �\n[image:"+got.Attachments[0].Ref+"]\n" || got.Attachments[0].Ref == img.Ref {
+		t.Fatalf("imported %+v", got)
+	}
+}
+
+// A manifest naming a file the archive doesn't hold creates nothing.
+func TestImportBrokenManifestCreatesNothing(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	u := newUser(t, s, "alice")
+	before, _ := s.ListNotes(ctx, u.ID, ListParams{})
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "notes", "N"), 0o700)
+	os.WriteFile(filepath.Join(dir, "notes", "N", "note.txt"), []byte("N"), 0o600)
+	man := `{"version":2,"notes":[{"id":"x","file":"notes/N/note.txt","title":"N","tags":[],"pinned":false,"trashed":false,
+	 "created_at":"","updated_at":"","attachments":[{"ref":"aaaaaaaaaa","filename":"gone.bin","file":"notes/N/files/gone.bin","mime":"","size_bytes":1}]}]}`
+	os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(man), 0o600)
+	if _, err := s.Import(ctx, u.ID, dir); err == nil {
+		t.Fatal("imported a manifest with a missing file")
+	}
+	if after, _ := s.ListNotes(ctx, u.ID, ListParams{}); len(after.Items) != len(before.Items) {
+		t.Fatalf("%d notes left behind", len(after.Items)-len(before.Items))
+	}
+}
+
+func tarGz(t *testing.T, name string, write func(tw *tar.Writer)) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	write(tw)
+	tw.Close()
+	gz.Close()
+	return buf.Bytes()
+}
+
+func addEntry(tw *tar.Writer, name, body string) {
+	tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: name, Size: int64(len(body)), Mode: 0o644})
+	tw.Write([]byte(body))
+}
+
+// What import refuses in a .tar.gz, and that a .tgz of a real archive works.
+func TestImportTarGzRefusals(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	u := newUser(t, s, "alice")
+	n, _ := s.CreateNote(ctx, u.ID, "Good")
+	good, _ := os.ReadFile(writeArchiveFile(t, s, u.ID, n.ID))
+	put := func(name string, b []byte) string {
+		p := filepath.Join(t.TempDir(), name)
+		os.WriteFile(p, b, 0o600)
+		return p
+	}
+	if c, err := s.Import(ctx, u.ID, put("good.tgz", good)); err != nil || c != 1 {
+		t.Fatalf(".tgz: %d %v", c, err)
+	}
+	badCRC := bytes.Clone(good)
+	badCRC[len(badCRC)-8] ^= 0xff
+	cases := map[string][]byte{
+		"a damaged checksum": badCRC,
+		"a cut-off archive":  good[:len(good)-8],
+		"a backup (no manifest)": tarGz(t, "", func(tw *tar.Writer) {
+			addEntry(tw, "users/u/notes/n/note.txt", "someone's note")
+		}),
+		"a name with ..": tarGz(t, "", func(tw *tar.Writer) { addEntry(tw, "notes/../manifest.json", "{}") }),
+		"a name with ./": tarGz(t, "", func(tw *tar.Writer) { addEntry(tw, "./manifest.json", "{}") }),
+		"an entry twice": tarGz(t, "", func(tw *tar.Writer) {
+			addEntry(tw, "manifest.json", "{}")
+			addEntry(tw, "manifest.json", "{}")
+		}),
+		"a sparse file": tarGz(t, "", func(tw *tar.Writer) {
+			tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: "big", Size: 0, Mode: 0o644,
+				PAXRecords: map[string]string{"GNU.sparse.major": "1", "GNU.sparse.minor": "0", "GNU.sparse.realsize": "100000000000"}})
+		}),
+	}
+	for what, b := range cases {
+		before, _ := s.ListNotes(ctx, u.ID, ListParams{})
+		if c, err := s.Import(ctx, u.ID, put("x.tar.gz", b)); err == nil {
+			t.Errorf("%s: imported %d", what, c)
+		}
+		if after, _ := s.ListNotes(ctx, u.ID, ListParams{}); len(after.Items) != len(before.Items) {
+			t.Errorf("%s: created notes", what)
+		}
+	}
+	// past the free-space floor, unpacking stops before writing
+	s.Cfg.MinFree = 1 << 62
+	if _, err := s.Import(ctx, u.ID, put("good.tar.gz", good)); !errors.Is(err, ErrNoSpace) {
+		t.Fatalf("free-space floor: %v", err)
+	}
+	s.Cfg.MinFree = 0
+	// a cancelled import stops
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := s.Import(cctx, u.ID, put("good.tar.gz", good)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled: %v", err)
+	}
+	if left, _ := filepath.Glob(filepath.Join(s.Dir, "tmp", "import", "*")); len(left) != 0 {
+		t.Fatalf("left behind: %v", left)
+	}
+}
+
+// A killed import's folder: doctor doesn't call it a stray upload, the janitor removes it
+// once it is a day old.
+func TestImportLeftoversCleanedUp(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	newUser(t, s, "alice")
+	left := filepath.Join(s.Dir, "tmp", "import", "123")
+	os.MkdirAll(filepath.Join(left, "notes", "N"), 0o700)
+	os.WriteFile(filepath.Join(left, "notes", "N", "note.txt"), []byte("x"), 0o600)
+	r, err := s.Doctor(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range r.Problems {
+		if strings.Contains(p, "import") {
+			t.Fatalf("doctor: %s", p)
+		}
+	}
+	s.removeImportLeftovers()
+	if _, err := os.Stat(left); err != nil {
+		t.Fatal("removed a fresh import folder")
+	}
+	old := time.Now().Add(-25 * time.Hour)
+	os.Chtimes(left, old, old)
+	s.removeImportLeftovers()
+	if _, err := os.Stat(left); err == nil {
+		t.Fatal("a day-old leftover stayed")
+	}
+}
+
+// This note's copy is gone but another note has one: the copy goes in under the
+// marker's ref, and the gone file isn't reported missing.
+func TestArchiveSupersededCopy(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	u := newUser(t, s, "alice")
+	a, _ := s.CreateNote(ctx, u.ID, "A")
+	img := uploadPNG(t, s, u.ID, a.ID, pngBytes)
+	b, _ := s.CreateNote(ctx, u.ID, "B\n[image:"+img.Ref+"] pic")
+	bc, _ := scanAtt(s.DB.R.QueryRow(`SELECT `+attCols+` FROM attachments WHERE note_id=?`, b.ID))
+	os.Remove(s.attPath(u.ID, &bc))
+	ar, got, _ := readArchive(t, s, u.ID, b.ID)
+	mn := archiveManifest(t, got)
+	if ar.Missing != 0 || got["MISSING.txt"] != nil || len(mn.Attachments) != 1 || mn.Attachments[0].Ref != img.Ref ||
+		!bytes.Equal(got[mn.Attachments[0].File], pngBytes) {
+		t.Fatalf("missing %d, manifest %+v", ar.Missing, mn)
+	}
+}
+
+func TestCapFileName(t *testing.T) {
+	long := strings.Repeat("é", 150) // 300 bytes
+	for in, check := range map[string]func(string) bool{
+		"short.png":             func(s string) bool { return s == "short.png" },
+		long + ".png":           func(s string) bool { return strings.HasSuffix(s, ".png") && len(s) <= archiveFileBytes },
+		long:                    func(s string) bool { return len(s) <= archiveFileBytes && utf8.ValidString(s) },
+		long + "." + long:       func(s string) bool { return len(s) <= archiveFileBytes && utf8.ValidString(s) }, // a long "extension" isn't kept
+		strings.Repeat("🦊", 70): func(s string) bool { return len(s) <= archiveFileBytes && utf8.ValidString(s) && len(s)%4 == 0 },
+	} {
+		if got := capFileName(in); !check(got) {
+			t.Errorf("capFileName(%d bytes) = %q (%d bytes)", len(in), got, len(got))
+		}
 	}
 }

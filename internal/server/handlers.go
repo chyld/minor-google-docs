@@ -543,7 +543,8 @@ func (s *Server) handleNotePage(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleNoteArchive serves a note as one .tar.gz with all its files (SPEC §24), or with
-// ?check=1 only what preparing it found: an error, or how many files are missing.
+// ?check=1 only what preparing it found: an error, or how many files are missing. HEAD
+// (the client's check just before downloading) answers the headers, with that count.
 func (s *Server) handleNoteArchive(w http.ResponseWriter, r *http.Request) {
 	if crossSite(w, r) {
 		return
@@ -553,7 +554,10 @@ func (s *Server) handleNoteArchive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a, err := s.store.PrepareNoteArchive(r.Context(), uid(r), id)
-	if err != nil {
+	if errors.Is(err, core.ErrUploadPending) {
+		writeErr(w, http.StatusConflict, "upload_pending", "Wait for the upload to finish: the archive includes every file.")
+		return
+	} else if err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -562,6 +566,7 @@ func (s *Server) handleNoteArchive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h := w.Header()
+	h.Set("X-Notes-Missing", strconv.Itoa(a.Missing))
 	h.Set("Content-Type", "application/gzip")
 	h.Set("Content-Disposition", contentDisposition("attachment", a.Filename()))
 	h.Set("Cache-Control", "no-store")

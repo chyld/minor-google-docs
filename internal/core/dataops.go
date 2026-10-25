@@ -156,6 +156,7 @@ type manifestMissing struct {
 	Ref      string `json:"ref"`
 	Filename string `json:"filename"`
 	Reason   string `json:"reason"`
+	shown    bool   // shown in the text by a marker
 }
 
 type manifestAttach struct {
@@ -331,7 +332,7 @@ func notReserved(name string) string {
 func (s *Store) Import(ctx context.Context, uid, path string) (int, error) {
 	var fsys fs.FS
 	if isTarGz(path) {
-		dir, err := s.unpackTarGz(path)
+		dir, err := s.unpackTarGz(ctx, path)
 		if dir != "" {
 			defer os.RemoveAll(dir)
 		}
@@ -343,7 +344,15 @@ func (s *Store) Import(ctx context.Context, uid, path string) (int, error) {
 			return 0, err
 		}
 		defer root.Close()
-		fsys = root.FS()
+		// a .tar.gz is a note archive (§24); anything else, e.g. a `notes backup`, must
+		// not turn into a pile of notes made from every .txt inside it
+		mb, err := readRegular(root.FS(), "manifest.json", maxManifestBytes)
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, fmt.Errorf("%s has no manifest.json, so it isn't a note archive (a `notes backup` is restored by unpacking it, see README)", filepath.Base(path))
+		} else if err != nil {
+			return 0, fmt.Errorf("manifest.json: %w", err)
+		}
+		return s.importExport(ctx, uid, root.FS(), mb)
 	} else if strings.EqualFold(filepath.Ext(path), ".zip") {
 		zr, err := zip.OpenReader(path)
 		if err != nil {
@@ -381,7 +390,7 @@ func (s *Store) Import(ctx context.Context, uid, path string) (int, error) {
 		if err != nil {
 			return fmt.Errorf("%s: %w", p, err)
 		}
-		if _, err := s.CreateNote(ctx, uid, string(b)); err != nil {
+		if _, err := s.CreateNote(ctx, uid, cleanPageText(string(b))); err != nil {
 			return fmt.Errorf("%s: %w", p, err)
 		}
 		n++
@@ -404,6 +413,27 @@ func (s *Store) importExport(ctx context.Context, uid string, fsys fs.FS, manife
 	fail := func(title string, err error) (int, error) {
 		return n, fmt.Errorf("import stopped after %d notes (at %q): %w", n, title, err)
 	}
+	// every note's text and file must be there before anything is created, so a broken
+	// export (a file listed but missing) never leaves half-made notes behind
+	texts := make([]string, len(man.Notes))
+	for i, mn := range man.Notes {
+		body, err := readRegular(fsys, mn.File, MaxBodyBytes)
+		if err != nil {
+			return fail(mn.Title, err)
+		}
+		// the text as the app would save it (LF, valid UTF-8, no NUL), so markers are
+		// found and the save can't refuse it after the note exists
+		if texts[i], err = NormalizeBody(cleanPageText(string(body))); err != nil {
+			return fail(mn.Title, err)
+		}
+		for _, ma := range mn.Attachments {
+			f, err := openRegular(fsys, ma.File)
+			if err != nil {
+				return fail(mn.Title, err)
+			}
+			f.Close()
+		}
+	}
 	// Pass 1: every note and its images. Refs are mapped once for the whole export,
 	// so a note that only shows another note's image follows that image's new ref.
 	type pending struct {
@@ -415,11 +445,7 @@ func (s *Store) importExport(ctx context.Context, uid string, fsys fs.FS, manife
 	var notes []pending
 	remap := map[string]string{} // export ref → ref in this account
 	inExport := map[string]bool{}
-	for _, mn := range man.Notes {
-		body, err := readRegular(fsys, mn.File, MaxBodyBytes)
-		if err != nil {
-			return fail(mn.Title, err)
-		}
+	for i, mn := range man.Notes {
 		m, err := s.CreateNote(ctx, uid, "")
 		if err != nil {
 			return fail(mn.Title, err)
@@ -443,7 +469,7 @@ func (s *Store) importExport(ctx context.Context, uid string, fsys fs.FS, manife
 				remap[ma.Ref] = a.Ref
 			}
 		}
-		notes = append(notes, pending{mn: mn, id: m.ID, sha: m.SHA256, text: string(body)})
+		notes = append(notes, pending{mn: mn, id: m.ID, sha: m.SHA256, text: texts[i]})
 	}
 	// Pass 2: the text, with markers rewritten through the export-wide mapping.
 	for _, p := range notes {
@@ -569,25 +595,30 @@ func isTarGz(path string) bool {
 	return strings.HasSuffix(p, ".tar.gz") || strings.HasSuffix(p, ".tgz")
 }
 
-// unpackTarGz unpacks a .tar.gz into a new folder under data/tmp (removed by the
-// caller): only folders and regular files, each name a plain relative path, written
-// through os.Root so nothing can land outside it. Links and devices are skipped.
-func (s *Store) unpackTarGz(path string) (string, error) {
+// unpackTarGz unpacks a .tar.gz into a new folder under data/tmp/import/ (removed by
+// the caller; the janitor removes one left by a killed import): only folders and regular
+// files, each name a plain relative path ("a/b", never "..", "./" or "//"), each once,
+// written through os.Root so nothing can land outside it. Links and devices are
+// skipped, sparse files refused. Writing goes through the free-space guard like an
+// upload, so an archive that unpacks to more than the disk can spare stops early, and
+// the gzip checksum is verified to the end.
+func (s *Store) unpackTarGz(ctx context.Context, path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
+	base := filepath.Base(path)
 	gz, err := gzip.NewReader(f)
 	if err != nil {
-		return "", fmt.Errorf("%s: %w", filepath.Base(path), err)
+		return "", fmt.Errorf("%s: %w", base, err)
 	}
 	defer gz.Close()
-	tmp := filepath.Join(s.Dir, "tmp")
-	if err := os.MkdirAll(tmp, fsx.DirMode); err != nil {
+	parent := filepath.Join(s.Dir, "tmp", "import")
+	if err := os.MkdirAll(parent, fsx.DirMode); err != nil {
 		return "", err
 	}
-	dir, err := os.MkdirTemp(tmp, "import-")
+	dir, err := os.MkdirTemp(parent, "")
 	if err != nil {
 		return "", err
 	}
@@ -596,20 +627,38 @@ func (s *Store) unpackTarGz(path string) (string, error) {
 		return dir, err
 	}
 	defer root.Close()
+	l, err := s.reserve(-1)
+	if err != nil {
+		return dir, err
+	}
+	defer l.release()
+	gw := &guardedWriter{l: l}
+	seen := map[string]bool{}
 	tr := tar.NewReader(gz)
-	for {
+	for entries := 0; ; entries++ {
+		if err := ctx.Err(); err != nil {
+			return dir, err
+		}
+		if entries > maxArchiveEntries {
+			return dir, fmt.Errorf("%s has more than %d entries", base, maxArchiveEntries)
+		}
 		hdr, err := tr.Next()
 		if err == io.EOF {
+			// tar stops at its end marker, before gzip's trailer: read on, so a
+			// damaged or cut-off archive is refused instead of imported
+			if _, err := io.Copy(io.Discard, gz); err != nil {
+				return dir, fmt.Errorf("%s: %w", base, err)
+			}
 			return dir, nil
 		} else if err != nil {
-			return dir, fmt.Errorf("%s: %w", filepath.Base(path), err)
+			return dir, fmt.Errorf("%s: %w", base, err)
 		}
-		name := strings.TrimSuffix(strings.TrimPrefix(hdr.Name, "./"), "/")
-		if name == "" || name == "." {
+		name := strings.TrimSuffix(hdr.Name, "/")
+		if hdr.Typeflag == tar.TypeDir && (name == "." || name == "") {
 			continue
 		}
-		if !filepath.IsLocal(name) || strings.ContainsRune(name, 0) {
-			return dir, fmt.Errorf("%s: unsafe name %q", filepath.Base(path), hdr.Name)
+		if !plainPath(name) {
+			return dir, fmt.Errorf("%s: unsafe name %q", base, hdr.Name)
 		}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
@@ -617,6 +666,15 @@ func (s *Store) unpackTarGz(path string) (string, error) {
 				return dir, err
 			}
 		case tar.TypeReg:
+			for k := range hdr.PAXRecords {
+				if strings.HasPrefix(k, "GNU.sparse.") {
+					return dir, fmt.Errorf("%s: %s is a sparse file, which a note archive never holds", base, name)
+				}
+			}
+			if seen[name] {
+				return dir, fmt.Errorf("%s: %s appears twice", base, name)
+			}
+			seen[name] = true
 			if d := filepath.Dir(name); d != "." {
 				if err := root.MkdirAll(d, fsx.DirMode); err != nil {
 					return dir, err
@@ -626,15 +684,34 @@ func (s *Store) unpackTarGz(path string) (string, error) {
 			if err != nil {
 				return dir, fmt.Errorf("%s: %w", name, err)
 			}
-			_, err = io.Copy(out, tr)
+			gw.f = out
+			_, err = io.Copy(gw, tr)
 			if cerr := out.Close(); err == nil {
 				err = cerr
 			}
 			if err != nil {
 				return dir, fmt.Errorf("%s: %w", name, err)
 			}
+		case tar.TypeGNUSparse:
+			return dir, fmt.Errorf("%s: %s is a sparse file, which a note archive never holds", base, name)
 		}
 	}
+}
+
+const maxArchiveEntries = 100_000
+
+// plainPath: a relative path written the plain way, "a/b/c", with no empty, "." or ".."
+// part (so it names exactly where it lands).
+func plainPath(name string) bool {
+	if name == "" || strings.ContainsRune(name, 0) || strings.ContainsRune(name, '\\') {
+		return false
+	}
+	for _, part := range strings.Split(name, "/") {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+	}
+	return filepath.IsLocal(name)
 }
 
 // openRegular opens name only if it is a regular file (no devices, fifos or dirs).

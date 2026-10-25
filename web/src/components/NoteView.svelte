@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
-  import { api, ApiError, archiveURL, downloadPage, startDownload } from '../lib/api';
+  import { api, ApiError, downloadArchive as fetchArchive, downloadPage } from '../lib/api';
   import { app } from '../lib/state.svelte';
   import { drafts } from '../lib/drafts';
   import { uploads } from '../lib/uploads.svelte';
@@ -524,9 +524,9 @@
     readonly
       ? undefined
       : download('archive', async (id, ready) => {
-          const { missing } = await api.archiveCheck(id);
+          await api.archiveCheck(id); // the server's message if it can't be made
           if (!ready()) return;
-          startDownload(archiveURL(id));
+          const missing = await fetchArchive(id);
           if (missing > 0) app.toast(`${missing === 1 ? '1 file is' : `${missing} files are`} missing on the server: see MISSING.txt in the archive.`, 'info');
         });
 

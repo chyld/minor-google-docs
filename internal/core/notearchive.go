@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -85,30 +86,30 @@ func (s *Store) PrepareNoteArchive(ctx context.Context, uid, id string) (*NoteAr
 		mn.TagColors[t.Name] = t.Color
 		meta.Tags = append(meta.Tags, t)
 	}
+	sums, err := s.attachmentSums(ctx, uid, nf.files)
+	if err != nil {
+		return nil, err
+	}
 	used := map[string]bool{}
 	for _, f := range nf.files {
 		switch {
 		case f.superseded:
 			continue // another note's copy is in the archive instead
 		case f.missing:
-			mn.Missing = append(mn.Missing, manifestMissing{Ref: f.Att.Ref, Filename: f.Att.Filename, Reason: "unreadable"})
+			mn.Missing = append(mn.Missing, manifestMissing{Ref: f.Att.Ref, Filename: f.Att.Filename, Reason: "unreadable", shown: f.shown})
 			continue
 		}
 		name := a.folder + "/files/" + uniqueFileName(used, capFileName(exportFileName(f.Att.Filename)))
 		a.files = append(a.files, archiveFile{name: name, f: f})
 		mn.Attachments = append(mn.Attachments, manifestAttach{Ref: f.Att.Ref, Filename: f.Att.Filename, File: name, Mime: f.Att.Mime, Size: f.size})
-		sum := ""
-		if err := s.DB.R.QueryRowContext(ctx, `SELECT COALESCE(sha256,'') FROM attachments WHERE id=? AND user_id=?`, f.Att.ID, uid).Scan(&sum); err != nil {
-			return nil, notFoundIfNoRows(err)
-		}
 		meta.Attachments = append(meta.Attachments, metaAtt{Ref: f.Att.Ref, Ext: f.Att.Ext, Filename: f.Att.Filename,
-			Mime: f.Att.Mime, SizeBytes: f.size, SHA256: sum, CreatedAt: f.Att.CreatedAt})
+			Mime: f.Att.Mime, SizeBytes: f.size, SHA256: sums[f.Att.ID], CreatedAt: f.Att.CreatedAt})
 	}
 	// images the text shows that exist nowhere: named by their caption
 	captions := markerCaptions(body)
 	for _, ref := range markerRefs(body) {
 		if nf.byRef[ref] == nil {
-			mn.Missing = append(mn.Missing, manifestMissing{Ref: ref, Filename: captions[ref], Reason: "not found"})
+			mn.Missing = append(mn.Missing, manifestMissing{Ref: ref, Filename: captions[ref], Reason: "not found", shown: true})
 		}
 	}
 	a.Missing = len(mn.Missing)
@@ -120,7 +121,11 @@ func (s *Store) PrepareNoteArchive(ctx context.Context, uid, id string) (*NoteAr
 			if name == "" {
 				name = "(image without a name)"
 			}
-			fmt.Fprintf(&b, "  %s  [image:%s]\n", name, x.Ref)
+			if x.shown { // the marker, as it is in the note's text
+				fmt.Fprintf(&b, "  %s  [image:%s]\n", name, x.Ref)
+			} else {
+				fmt.Fprintf(&b, "  %s\n", name)
+			}
 		}
 		b.WriteString("\nIn the app, Account & data → Check my notes looks for them.\n")
 		a.missing = []byte(b.String())
@@ -135,6 +140,34 @@ func (s *Store) PrepareNoteArchive(ctx context.Context, uid, id string) (*NoteAr
 	}
 	a.manifest = append(a.manifest, '\n')
 	return a, nil
+}
+
+// attachmentSums: the files' content hashes in one query (a row deleted meanwhile has
+// none; its file is still in the archive, as snapshotted).
+func (s *Store) attachmentSums(ctx context.Context, uid string, files []*NoteFile) (map[string]string, error) {
+	out := map[string]string{}
+	if len(files) == 0 {
+		return out, nil
+	}
+	ids := make([]any, 0, len(files)+1)
+	ids = append(ids, uid)
+	for _, f := range files {
+		ids = append(ids, f.Att.ID)
+	}
+	rows, err := s.DB.R.QueryContext(ctx, `SELECT id, COALESCE(sha256,'') FROM attachments WHERE user_id=? AND id IN (?`+
+		strings.Repeat(",?", len(files)-1)+`)`, ids...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, sum string
+		if err := rows.Scan(&id, &sum); err != nil {
+			return nil, err
+		}
+		out[id] = sum
+	}
+	return out, rows.Err()
 }
 
 // markerCaptions: each ref's caption on its first marker line.
@@ -187,8 +220,8 @@ func (a *NoteArchive) Filename() string {
 // WriteTo writes the archive. Any error after the first byte means the output is
 // incomplete: the caller must abort the response, never end it normally.
 func (a *NoteArchive) WriteTo(w io.Writer) (int64, error) {
-	if archiveBeforeWrite != nil {
-		archiveBeforeWrite(a)
+	if hook := archiveBeforeWrite.Load(); hook != nil {
+		(*hook)(a)
 	}
 	cw := &countWriter{w: w}
 	gz, err := gzip.NewWriterLevel(cw, gzip.BestSpeed) // attachments are mostly compressed already
@@ -263,5 +296,6 @@ func (a *NoteArchive) writeFile(tw *tar.Writer, af archiveFile) error {
 	return nil
 }
 
-// archiveBeforeWrite lets tests change files between the snapshot and the write.
-var archiveBeforeWrite func(*NoteArchive)
+// archiveBeforeWrite lets tests change files between the snapshot and the write
+// (atomic: a reset request's handler may still be writing when a test clears it).
+var archiveBeforeWrite atomic.Pointer[func(*NoteArchive)]

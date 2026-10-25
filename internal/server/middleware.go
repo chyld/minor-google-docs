@@ -265,7 +265,7 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, core.ErrRefTaken):
 		writeErr(w, http.StatusConflict, "ref_taken", err.Error())
 	case errors.Is(err, core.ErrUploadPending):
-		writeErr(w, http.StatusConflict, "upload_pending", "Wait for the upload to finish: the download includes every file.")
+		writeErr(w, http.StatusConflict, "upload_pending", "Wait for the upload to finish: the page includes every file.")
 	case errors.Is(err, core.ErrNoteTrashed):
 		writeErr(w, http.StatusConflict, "note_trashed", "Restore the note to download it.")
 	case errors.Is(err, core.ErrCopyPending):

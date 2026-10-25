@@ -49,8 +49,8 @@ func TestNoteArchiveRoute(t *testing.T) {
 	if !names["notes/Trip plan/note.txt"] || !names["manifest.json"] {
 		t.Fatalf("entries: %v", names)
 	}
-	if res := h.do(a, "HEAD", path, "", nil); res.StatusCode != 200 {
-		t.Fatalf("HEAD: %d", res.StatusCode)
+	if res := h.do(a, "HEAD", path, "", nil); res.StatusCode != 200 || res.Header.Get("X-Notes-Missing") != "0" {
+		t.Fatalf("HEAD: %d %v", res.StatusCode, res.Header)
 	}
 	// someone else's note, or a request started by another site (a sibling site too)
 	for _, p := range []string{path, path + "?check=1"} {
@@ -71,8 +71,13 @@ func TestNoteArchiveRoute(t *testing.T) {
 	h.store.CreateUpload(ctx, u.ID, core.UploadMeta{ID: id, Ref: core.NewRef(), NoteID: note.ID, Filename: "x.png", Length: 10})
 	res = h.do(a, "GET", path+"?check=1", "", nil)
 	if e := decode[map[string]map[string]string](t, res); res.StatusCode != http.StatusConflict || e["error"]["code"] != "upload_pending" ||
-		strings.Contains(e["error"]["message"], "page") {
+		!strings.Contains(e["error"]["message"], "the archive includes") {
 		t.Fatalf("upload pending: %d %v", res.StatusCode, e)
+	}
+	// the web page keeps its own words
+	res = h.do(a, "GET", "/api/notes/"+note.ID+"/html?estimate=1", "", nil)
+	if e := decode[map[string]map[string]string](t, res); !strings.Contains(e["error"]["message"], "the page includes") {
+		t.Fatalf("page upload pending: %v", e)
 	}
 	h.store.DB.W.Exec(`DELETE FROM attachments WHERE id=?`, id)
 	h.do(a, "PATCH", "/api/notes/"+note.ID, `{"trashed":true}`, nil)
@@ -84,13 +89,19 @@ func TestNoteArchiveRoute(t *testing.T) {
 	}
 }
 
-// ?check=1 reports files missing on the server, so the client can say so.
+// ?check=1 and HEAD report files missing on the server, so the client can say so; a
+// title in any script is a valid download name.
 func TestNoteArchiveCheckCountsMissing(t *testing.T) {
 	h := newHarness(t)
 	a := h.login("alice")
-	note := decode[core.NoteMeta](t, h.do(a, "POST", "/api/notes", `{"body":"Pics\n[image:aaaaaaaaaa] gone"}`, nil))
-	if c := decode[map[string]int](t, h.do(a, "GET", "/api/notes/"+note.ID+"/archive?check=1", "", nil)); c["missing"] != 1 {
+	note := decode[core.NoteMeta](t, h.do(a, "POST", "/api/notes", `{"body":"Café 東京\n[image:aaaaaaaaaa] gone"}`, nil))
+	path := "/api/notes/" + note.ID + "/archive"
+	if c := decode[map[string]int](t, h.do(a, "GET", path+"?check=1", "", nil)); c["missing"] != 1 {
 		t.Fatalf("check: %v", c)
+	}
+	res := h.do(a, "HEAD", path, "", nil)
+	if res.Header.Get("X-Notes-Missing") != "1" || !strings.Contains(res.Header.Get("Content-Disposition"), "filename*=UTF-8''Caf%C3%A9%20%E6%9D%B1%E4%BA%AC.tar.gz") {
+		t.Fatalf("HEAD: %v", res.Header)
 	}
 }
 

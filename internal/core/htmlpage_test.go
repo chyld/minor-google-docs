@@ -501,19 +501,19 @@ func TestPageFileVanishesOrGrows(t *testing.T) {
 	data := bytes.Repeat([]byte("zip "), 4000)
 	a := uploadBytes(t, s, u.ID, n.ID, "a.zip", data)
 	path := s.attPath(u.ID, a)
-	defer func() { pageBeforeWrite = nil }()
+	defer SetPageBeforeWriteForTest(nil)
 
-	pageBeforeWrite = func(*Page) { os.Remove(path) }
+	SetPageBeforeWriteForTest(func(*Page) { os.Remove(path) })
 	p, _ := s.PreparePage(ctx, u.ID, n.ID, "")
 	if _, err := p.WriteTo(&bytes.Buffer{}); err == nil {
 		t.Fatal("a file deleted after the snapshot didn't fail the write")
 	}
 	os.WriteFile(path, data, 0o600)
-	pageBeforeWrite = func(*Page) {
+	SetPageBeforeWriteForTest(func(*Page) {
 		f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 		f.Write([]byte("more"))
 		f.Close()
-	}
+	})
 	p, _ = s.PreparePage(ctx, u.ID, n.ID, "")
 	var buf bytes.Buffer
 	if _, err := p.WriteTo(&buf); err != nil {
@@ -524,17 +524,17 @@ func TestPageFileVanishesOrGrows(t *testing.T) {
 	}
 	// another (longer) file renamed onto the path: refused, not read as a prefix
 	os.WriteFile(path, data, 0o600)
-	pageBeforeWrite = func(*Page) {
+	SetPageBeforeWriteForTest(func(*Page) {
 		tmp := path + ".new"
 		os.WriteFile(tmp, append(bytes.Repeat([]byte("X"), len(data)), "tail"...), 0o600)
 		os.Rename(tmp, path)
-	}
+	})
 	p, _ = s.PreparePage(ctx, u.ID, n.ID, "")
 	if _, err := p.WriteTo(&bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "changed") {
 		t.Fatalf("a replaced file: %v", err)
 	}
 	// a FIFO (or symlink) at the path never blocks or is followed
-	pageBeforeWrite = nil
+	SetPageBeforeWriteForTest(nil)
 	os.Remove(path)
 	if err := unix.Mkfifo(path, 0o600); err != nil {
 		t.Skip("no fifo support")
