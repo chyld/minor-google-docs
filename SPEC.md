@@ -542,7 +542,10 @@ file names once per folder, comparing case-insensitively. `manifest.json` (versi
 note's folder, file, tags with their colours, pins, dates and images (ref, name, file), and is what
 import reads, so old and new zips both import. Importing keeps an image's ref when it is free, or
 when the same ref already holds the same content (a copy); otherwise it picks a new ref and
-rewrites the marker.
+rewrites the marker. A single note can be downloaded as a `.tar.gz` in the same layout (§24);
+`notes import` takes that too, unpacking it into a new folder under `data/tmp/` first (folders
+and regular files only, every name a plain relative path, written through `os.Root`; links and
+devices skipped; the folder is removed afterwards).
 
 ### Config (env)
 
@@ -576,6 +579,7 @@ PATCH  /api/attachments/{id}               {filename}
 DELETE /api/attachments/{id}
 GET    /api/export                         zip of the current user's data
 GET    /api/notes/{id}/html[?estimate=1&theme=]  one note as a self-contained web page (§23)
+GET    /api/notes/{id}/archive[?check=1]   one note as a .tar.gz with all its files (§24)
 GET    /healthz
 ```
 
@@ -1108,3 +1112,89 @@ which can be saved back from the page. No size limit. The page needs nothing fro
   headings kept with what follows, images not split.
 - Not carried into the page: raw text view, monospace font, page width (it is always the rendered
   note in the default column), and folded sections.
+
+## 24. Download note as .tar.gz
+
+One note becomes **one `.tar.gz`** with every file that belongs to it, ready to unpack anywhere
+or to bring back with `notes import`. Where "Save as web page" (§23) is for reading, the archive
+is for **keeping the files**: originals, under their own names, nothing re-encoded. Reviewed as a
+plan by team beta (8 of 8, approve with changes; findings folded in).
+
+**Owner decisions:** the format is `.tar.gz`; trashed notes can't be downloaded; `note.txt.bak`
+is never included; the action lives in the ⋯ menu (no toolbar button); no size warning, however
+big.
+
+- **What belongs to the note:** its text (`note.txt`, the raw bytes), every **ready** attachment
+  (images and other files, shown in the text or not), and, for an image the text shows that this
+  note has no readable copy of, another of the same user's notes' copy (the editor's and §23's
+  lookup). Not included: `note.txt.bak`, uploads still running (they make the request wait,
+  below), stray files without a database row (`doctor` handles those), and anything of another
+  user.
+- **Where:** the note's ⋯ menu ("Download as .tar.gz", the `archive` icon) and the palette
+  ("Download note as .tar.gz", only when the open note isn't in the trash). Trashed notes have no
+  ⋯ menu and no button for it, and the server refuses them (`409 note_trashed`, "Restore the note
+  to download it.").
+- **What's inside** (the full export's layout, §9.3, for one note):
+  ```
+  notes/<title>/note.txt
+  notes/<title>/meta.json
+  notes/<title>/files/<name>    every included file, under its original name
+  MISSING.txt                   only when something couldn't be included
+  manifest.json                 version 2, one note: the importer reads only this
+  ```
+  - **`manifest.json` is built from what is in the archive**: the export's entry for one note,
+    `file`/`folder`/`attachments[].file` equal to the entry paths, RFC 3339 dates, tags with
+    colours, pin, `trashed: false`. A borrowed copy is listed under the marker's ref, so import
+    gives the note its own copy and the marker keeps working. A file that couldn't be included is
+    **not** listed in `attachments` (the importer stops on a listed file it can't open); it goes
+    in the note's `missing` list (`ref`, `filename`, `reason`: `unreadable` or `not found`), which
+    the importer ignores and the full export never writes.
+  - **`meta.json`** is built from the same inventory (not reread from disk), so it never names a
+    file the archive doesn't have.
+  - **`MISSING.txt`** names, for people, the files missing on the server: an unreadable file, or
+    an image the text shows that exists nowhere (by its caption), with its marker, and points to
+    Check my notes. An own file replaced by another note's copy isn't listed.
+  - Names: `safeName` for the folder, the export's file-name rules (`exportFileName`: Windows-unsafe
+    characters → `_`, reserved names prefixed) and case-insensitive de-duplication across own and
+    borrowed files (`name (2).png`, `uniqueFileName`, shared with the export), plus a **byte** cap
+    (folder ≤ 200 bytes, file ≤ 230, cut on a rune boundary, the extension kept), so an all-emoji
+    title still unpacks within 255-byte names. No entry is absolute or has `..`.
+  - Tar entries are PAX (UTF-8 names, any size), files `0644`, folders `0755`, times from the note
+    and the files; gzip at `BestSpeed` (attachments are mostly compressed already).
+- **Download name:** `<title>.tar.gz` (`safeName`, capped like the folder), sent with
+  `contentDisposition` (RFC 5987), `Content-Type: application/gzip`, `Cache-Control: no-store`.
+- **Server** (`internal/core/notearchive.go`, shared parts in `notefiles.go`):
+  - `PrepareNoteArchive(ctx, uid, id)` authorizes (404 otherwise), refuses a trashed note, refuses
+    `409 upload_pending` while an upload to the note runs (5-minute quiet rule, as §23), reads
+    `note.txt` with `openRegularFile` (no symlink, no FIFO; at most `MaxBodyBytes`, as the importer
+    takes; missing → 404), keeps those raw bytes (markers are found in a cleaned copy), and
+    resolves the files. Database errors fail the request.
+  - **Shared with §23:** `resolveNoteFiles` (own readable / borrowed / own replaced by a copy /
+    found nowhere), `NoteFile` (was `PageFile`), `openRegularFile`, `uploadPending`, `noteTags`;
+    the page now also reads its text without following a symlink.
+  - **Streaming, no `Content-Length`**, like the full export, through `slidingWrites` (a big
+    archive outlives the 120 s write deadline). Each file is reopened with `openRegularFile`, must
+    be the same inode (`os.SameFile`) and exactly the snapshot size, and is copied with
+    `io.CopyN`; anything else, or any read or write failure, resets the connection
+    (`http.ErrAbortHandler`), so the browser reports a failed download, never a short archive.
+  - The full export's output is unchanged; only `uniqueFileName` and the manifest types are shared.
+- **Handler:** `GET /api/notes/{id}/archive` (the mux answers `HEAD` too), behind `requireUser` and
+  `crossSite` (only absent, `same-origin` or `none`). `?check=1` does the whole preparation and
+  answers `{"missing": n}` or the error, so the client can show the server's message.
+- **Client** (one `download` helper in `NoteView.svelte` for the page and the archive, each with its
+  own words): remember the note; save first; refuse on unsaved changes, a conflict, a save error or
+  an upload in progress ("…the archive includes every file"); `?check=1`; check again; start the
+  download through the browser (`startDownload`: streamed to disk, never held in memory). When
+  files are missing, a toast: "N files are missing on the server: see MISSING.txt in the archive."
+  The 409 upload message is now neutral ("…the download includes every file").
+- **Import:** `notes import <user> note.tar.gz` (also `.tgz`) unpacks safely (§9.3) and imports
+  as an export: a new note with text, tags, pin, dates and files; markers remapped if needed.
+- **Tests:** `internal/core/notearchive_test.go` (entries and names, raw text, borrowed and missing
+  files, manifest and meta, import round trip incl. a remapped ref, refusals: other user, trashed,
+  upload running, symlinked and FIFO `note.txt`; a file deleted, grown, shrunk, replaced or
+  symlinked after the snapshot fails the write; byte caps; a note titled `manifest.json`; unsafe
+  `.tar.gz` names on import); `internal/server/archive_test.go` (route, headers, HEAD, `?check=1`,
+  404/403/409, mid-stream reset); `web/e2e/archive.mjs` (⋯ menu and palette, unpacked with `tar`,
+  MISSING.txt and toast, unsaved change refused, trashed note: no button, no palette entry, 409).
+- Not in v1: choosing which files go in, several notes at once (the full export does that),
+  in-app import (the CLI does it), a size up front.

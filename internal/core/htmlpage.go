@@ -20,8 +20,6 @@ import (
 	"unicode"
 	"unicode/utf16"
 
-	"golang.org/x/sys/unix"
-
 	"homelab-notes/internal/pageassets"
 )
 
@@ -48,21 +46,8 @@ func hueOf(name string) int {
 	return 262
 }
 
-// PageFile is one file the page carries.
-type PageFile struct {
-	Att        Attachment
-	path       string
-	size       int64
-	own        bool        // in this note (otherwise a copy from another note, shown in the text)
-	shown      bool        // shown in the text by a marker
-	info       os.FileInfo // the file as snapshotted: the write refuses a different one
-	missing    bool        // no readable file on disk
-	superseded bool        // this note's unreadable copy, replaced by another note's (not listed)
-	n          int
-}
-
-func (f *PageFile) inline() bool { return InlineImageTypes[f.Att.Mime] }
-func (f *PageFile) small() bool  { return f.inline() && f.size <= pageSmallImage }
+func (f *NoteFile) inline() bool { return InlineImageTypes[f.Att.Mime] }
+func (f *NoteFile) small() bool  { return f.inline() && f.size <= pageSmallImage }
 
 // Page is a snapshot of a note ready to be written as HTML.
 type Page struct {
@@ -75,8 +60,8 @@ type Page struct {
 	exported time.Time
 	tags     []metaTag
 	theme    string
-	files    []*PageFile
-	byRef    map[string]*PageFile
+	files    []*NoteFile
+	byRef    map[string]*NoteFile
 	size     int64
 }
 
@@ -87,10 +72,8 @@ func (s *Store) PreparePage(ctx context.Context, uid, id, theme string) (*Page, 
 	if err != nil {
 		return nil, err
 	}
-	// a busy upload would be missing from the page: wait for it (rows left behind by
-	// an abandoned upload stop counting after a few minutes; the janitor removes them)
-	if s.exists(ctx, `SELECT 1 FROM attachments WHERE note_id=? AND user_id=? AND state='uploading' AND updated_at>?`,
-		id, uid, now()-int64(uploadQuiet/time.Millisecond)) {
+	// a busy upload would be missing from the page: wait for it
+	if s.uploadPending(ctx, uid, id) {
 		return nil, ErrUploadPending
 	}
 	raw, err := readCapped(s.notePath(uid, id), MaxBodyBytes)
@@ -101,163 +84,27 @@ func (s *Store) PreparePage(ctx context.Context, uid, id, theme string) (*Page, 
 	}
 	body := cleanPageText(string(raw))
 	p := &Page{uid: uid, id: id, Title: DeriveTitle(body), body: body, trashed: m.TrashedAt != nil,
-		created: m.CreatedAt, updated: m.UpdatedAt, exported: time.Now(), byRef: map[string]*PageFile{}}
+		created: m.CreatedAt, updated: m.UpdatedAt, exported: time.Now(), byRef: map[string]*NoteFile{}}
 	switch theme {
 	case "light", "dark":
 		p.theme = theme
 	default:
 		p.theme = "auto"
 	}
-	// tags in the app's order (by name)
-	rows, err := s.DB.R.QueryContext(ctx, `SELECT t.name,t.color FROM tags t JOIN note_tags nt ON nt.tag_id=t.id
- WHERE nt.note_id=? AND t.user_id=? ORDER BY t.name`, id, uid)
+	if p.tags, err = s.noteTags(ctx, uid, id); err != nil {
+		return nil, err
+	}
+	nf, err := s.resolveNoteFiles(ctx, uid, id, body)
 	if err != nil {
 		return nil, err
 	}
-	for rows.Next() {
-		var t metaTag
-		if err := rows.Scan(&t.Name, &t.Color); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		p.tags = append(p.tags, t)
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return nil, err
-	}
-	atts, err := s.ListAttachments(ctx, uid, id)
-	if err != nil {
-		return nil, err
-	}
-	own := map[string]*PageFile{}
-	for _, a := range atts {
-		own[a.Ref] = p.addFile(s, a, true)
-	}
-	// images the text shows from another note (a copy not made yet, or this note's
-	// copy can't be read): the same lookup as the editor's
-	for _, ref := range markerRefs(body) {
-		if f := own[ref]; f != nil && !f.missing {
-			f.shown = true
-			p.byRef[ref] = f
-			continue
-		}
-		c, err := s.pageCopy(ctx, uid, ref, id)
-		if err != nil {
-			return nil, err
-		}
-		if c != nil {
-			if f := own[ref]; f != nil {
-				f.superseded = true // the copy stands in for this note's unreadable file
-			}
-			f := p.addFile(s, *c, false)
-			f.shown = true
-			p.byRef[ref] = f
-		} else if f := own[ref]; f != nil {
-			f.shown = true
-			p.byRef[ref] = f
-		}
-	}
+	p.files, p.byRef = nf.files, nf.byRef
 	n, err := p.render(nil, nil)
 	if err != nil {
 		return nil, err
 	}
 	p.size = n
 	return p, nil
-}
-
-// ErrUploadPending: an upload to the note is still running.
-var ErrUploadPending = errors.New("an upload to this note is still running: wait for it to finish")
-
-// uploads quiet for this long count as abandoned for the page
-const uploadQuiet = 5 * time.Minute
-
-func readCapped(path string, limit int64) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(b)) > limit {
-		return nil, Invalid("this note is larger than %d MiB", limit>>20)
-	}
-	return b, nil
-}
-
-// addFile adds a file to the page's inventory. A file that can't be opened counts as
-// missing, so the snapshot never promises bytes the write can't read.
-func (p *Page) addFile(s *Store, a Attachment, own bool) *PageFile {
-	f := &PageFile{Att: a, own: own, n: len(p.files), missing: true}
-	if a.Ext != "" {
-		f.path = s.attPath(p.uid, &a)
-		if st, ok := openable(f.path); ok {
-			f.info, f.size, f.missing = st, st.Size(), false
-		}
-	}
-	p.files = append(p.files, f)
-	return f
-}
-
-// openRegular opens a file for reading without following a symlink or waiting on a
-// FIFO, and only if it is a regular file.
-func openRegularFile(path string) (*os.File, os.FileInfo, error) {
-	fh, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
-	if err != nil {
-		return nil, nil, err
-	}
-	st, err := fh.Stat()
-	if err == nil && !st.Mode().IsRegular() {
-		err = fmt.Errorf("%s is not a regular file", filepath.Base(path))
-	}
-	if err != nil {
-		fh.Close()
-		return nil, nil, err
-	}
-	return fh, st, nil
-}
-
-// openable proves a file can be read and returns what it is.
-func openable(path string) (os.FileInfo, bool) {
-	fh, st, err := openRegularFile(path)
-	if err != nil {
-		return nil, false
-	}
-	fh.Close()
-	return st, true
-}
-
-// pageCopy finds a ready copy of ref in another of the user's notes that can be read.
-func (s *Store) pageCopy(ctx context.Context, uid, ref, noteID string) (*Attachment, error) {
-	rows, err := s.DB.R.QueryContext(ctx, `SELECT `+attCols+` FROM attachments
- WHERE user_id=? AND ref=? AND state='ready' AND note_id!=? AND ext!='' ORDER BY created_at DESC, id`, uid, ref, noteID)
-	if err != nil {
-		return nil, err
-	}
-	var cands []Attachment
-	for rows.Next() {
-		a, err := scanAtt(rows)
-		if err != nil {
-			rows.Close()
-			return nil, err
-		}
-		cands = append(cands, a)
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return nil, err
-	}
-	for i := range cands {
-		if _, ok := openable(s.attPath(uid, &cands[i])); ok {
-			return &cands[i], nil
-		}
-	}
-	return nil, nil
 }
 
 // Size is the exact number of bytes WriteTo writes.
@@ -439,7 +286,7 @@ func (w *pageWriter) esc(s string) { w.str(html.EscapeString(s)) }
 // b64 writes n bytes of file f from off as base64. last closes the file afterwards:
 // a file's bytes are written in one go (small image) or one run of chunks, so only
 // one file is ever open.
-func (w *pageWriter) b64(f *PageFile, off, n int64, last bool) {
+func (w *pageWriter) b64(f *NoteFile, off, n int64, last bool) {
 	if w.err != nil {
 		return
 	}
@@ -450,16 +297,10 @@ func (w *pageWriter) b64(f *PageFile, off, n int64, last bool) {
 	}
 	fh := w.files[f.n]
 	if fh == nil {
-		var st os.FileInfo
 		var err error
-		if fh, st, err = openRegularFile(f.path); err != nil {
-			w.err = err
-			return
-		}
 		// another file moved onto the path since the snapshot: its bytes aren't the ones promised
-		if !os.SameFile(st, f.info) || st.Size() < f.size {
-			fh.Close()
-			w.err = fmt.Errorf("%s changed after the page was prepared", f.Att.Filename)
+		if fh, err = f.openSnapshotted(false); err != nil {
+			w.err = err
 			return
 		}
 		w.files[f.n] = fh
@@ -745,7 +586,7 @@ func (p *Page) writeFigure(w *pageWriter, l string) {
 
 // writeImg writes an <img> for an inline image: a small one carries its bytes as a
 // data: URL the first time it appears; the script fills in the others.
-func (p *Page) writeImg(w *pageWriter, f *PageFile, class, alt string) {
+func (p *Page) writeImg(w *pageWriter, f *NoteFile, class, alt string) {
 	w.str("<img")
 	if class == "" {
 		w.str(" tabindex=\"0\"") // Enter or Space zooms, like a click

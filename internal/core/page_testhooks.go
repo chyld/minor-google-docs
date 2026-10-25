@@ -14,3 +14,16 @@ func (p *Page) PageFilePaths() []string {
 	}
 	return out
 }
+
+// SetArchiveBeforeWriteForTest lets other packages' tests change files between an
+// archive's snapshot and its write.
+func SetArchiveBeforeWriteForTest(f func(*NoteArchive)) { archiveBeforeWrite = f }
+
+// ArchiveFilePaths lists the on-disk paths of the files an archive will carry (tests).
+func (a *NoteArchive) ArchiveFilePaths() []string {
+	var out []string
+	for _, af := range a.files {
+		out = append(out, af.f.path)
+	}
+	return out
+}

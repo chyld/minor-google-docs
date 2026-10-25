@@ -41,6 +41,7 @@
     { kind: 'action', id: 'account', label: 'Account & data', icon: 'user', run: () => (app.accountOpen = true) },
     { kind: 'action', id: 'export', label: 'Export my notes', icon: 'download', run: downloadExport },
     ...(app.selectedId ? ([{ kind: 'action', id: 'save-page', label: 'Save note as web page', icon: 'page', run: () => window.dispatchEvent(new CustomEvent('notes:save-page')) }] as Item[]) : []),
+    ...(app.selectedId && !app.noteReadonly ? ([{ kind: 'action', id: 'download-archive', label: 'Download note as .tar.gz', icon: 'archive', run: () => window.dispatchEvent(new CustomEvent('notes:download-archive')) }] as Item[]) : []),
     ...(app.selectedId && !app.raw && !app.noteReadonly
       ? ([
           { kind: 'action', id: 'fmt-b', label: 'Bold', icon: 'bold', hint: 'Ctrl B', run: () => window.dispatchEvent(new CustomEvent('notes:format', { detail: { kind: 'toggle', style: 'b' } })) },

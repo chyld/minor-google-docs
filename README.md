@@ -64,7 +64,7 @@ Run any of these with `docker compose exec -it notes notes …`:
 | `user rm <name> [--purge-data]` | remove a user; without `--purge-data` their files move to `lost+found/`. `--purge-data` asks you to type the name, so run it with `docker compose exec -it` |
 | `backup [dir]` | consistent snapshot → `data/backups/notes-<time>.tar.gz` (safe while running) |
 | `export <user> [file.zip]` | a folder per note (text, details, images) + `manifest.json` (default: `data/backups/`); also **Export my notes** in the app |
-| `import <user> <zip\|dir>` | restore an export (tags, pins, dates, files), or create notes from `.txt` files |
+| `import <user> <zip\|tar.gz\|dir>` | restore an export or a note's `.tar.gz` (tags, pins, dates, files), or create notes from `.txt` files |
 | `reindex` | rebuild search |
 | `doctor [--fix]` | check files ↔ database; `--fix` moves stray files to `lost+found/`, restores missing notes from `.bak`, copies missing images back from another note. Users can run their own check from **Account & data → Check my notes** |
 | `migrate-layout` | convert an older data folder to one folder per note (the server also does this on its first start) |
@@ -90,6 +90,11 @@ Users can also export their own data from **Account & data** in the app.
 A single note can be saved as one self-contained web page (⋯ → **Save as web page**): its text,
 sections, highlights and images as in the app, plus every attached file, which can be saved back
 from the page. It opens offline in any browser and prints cleanly.
+
+To keep a note's files, ⋯ → **Download as .tar.gz** gives one archive with the note's text and
+every image and attachment under its original name (trashed notes: restore them first). Files
+missing on the server are listed in `MISSING.txt` inside it. `notes import <user> note.tar.gz`
+brings the note back.
 
 ### Restore
 

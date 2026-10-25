@@ -92,6 +92,7 @@ export const api = {
   patchTag: (id: string, patch: { name?: string; color?: string }) => request<Tag>('PATCH', `/api/tags/${id}`, patch),
   deleteTag: (id: string) => request<void>('DELETE', `/api/tags/${id}`),
 
+  archiveCheck: (id: string) => request<{ missing: number }>('GET', `/api/notes/${id}/archive?check=1`),
   pageSize: (id: string, theme: string) => request<{ bytes: number }>('GET', `/api/notes/${id}/html?estimate=1&theme=${encodeURIComponent(theme)}`),
   attachmentMeta: (id: string) => request<Attachment>('GET', `/api/attachments/${id}/meta`),
   byRef: (ref: string) => request<Attachment>('GET', `/api/refs/${ref}`),
@@ -109,6 +110,11 @@ export async function downloadPage(id: string, theme: string) {
     await request('GET', `/api/notes/${id}/html?estimate=1&theme=${encodeURIComponent(theme)}`);
     throw new ApiError(res.status, 'error', 'The page could not be made. Try again.');
   }
+  startDownload(url);
+}
+
+/** Starts a download through the browser (streamed to disk, never held in memory). */
+export function startDownload(url: string) {
   const a = document.createElement('a');
   a.href = url;
   a.download = '';
@@ -118,13 +124,9 @@ export async function downloadPage(id: string, theme: string) {
 }
 
 /** Starts a download of the signed-in user's export zip (one folder per note). */
-export function downloadExport() {
-  const a = document.createElement('a');
-  a.href = '/api/export';
-  a.download = '';
-  document.body.append(a);
-  a.click();
-  a.remove();
-}
+export const downloadExport = () => startDownload('/api/export');
+
+/** One note as a .tar.gz with all its files (SPEC §24). */
+export const archiveURL = (id: string) => `/api/notes/${id}/archive`;
 
 export const attachmentURL = (id: string, download = false) => `/api/attachments/${id}${download ? '?download=1' : ''}`;

@@ -541,3 +541,35 @@ func (s *Server) handleNotePage(w http.ResponseWriter, r *http.Request) {
 		panic(http.ErrAbortHandler) // never a page that looks complete but isn't
 	}
 }
+
+// handleNoteArchive serves a note as one .tar.gz with all its files (SPEC §24), or with
+// ?check=1 only what preparing it found: an error, or how many files are missing.
+func (s *Server) handleNoteArchive(w http.ResponseWriter, r *http.Request) {
+	if crossSite(w, r) {
+		return
+	}
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	a, err := s.store.PrepareNoteArchive(r.Context(), uid(r), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if r.URL.Query().Get("check") == "1" {
+		writeJSON(w, http.StatusOK, map[string]int{"missing": a.Missing})
+		return
+	}
+	h := w.Header()
+	h.Set("Content-Type", "application/gzip")
+	h.Set("Content-Disposition", contentDisposition("attachment", a.Filename()))
+	h.Set("Cache-Control", "no-store")
+	if r.Method == http.MethodHead {
+		return
+	}
+	if _, err := a.WriteTo(slidingWrites(w)); err != nil {
+		s.log.Error("note archive failed mid-stream", "note", id, "err", err)
+		panic(http.ErrAbortHandler) // never an archive that looks complete but isn't
+	}
+}

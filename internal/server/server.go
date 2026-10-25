@@ -85,6 +85,7 @@ func (s *Server) Routes() http.Handler {
 
 	api("GET /api/export", s.handleExport)
 	api("GET /api/notes/{id}/html", s.handleNotePage)
+	api("GET /api/notes/{id}/archive", s.handleNoteArchive)
 	api("GET /api/me/doctor", s.handleDoctorStatus)
 	api("POST /api/me/doctor", s.handleDoctorStart)
 

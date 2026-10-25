@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
-  import { api, ApiError, downloadPage } from '../lib/api';
+  import { api, ApiError, archiveURL, downloadPage, startDownload } from '../lib/api';
   import { app } from '../lib/state.svelte';
   import { drafts } from '../lib/drafts';
   import { uploads } from '../lib/uploads.svelte';
@@ -477,23 +477,25 @@
     }
   }
 
-  // ---- save as web page (SPEC §23) ----
-  let pageBusy = $state(false);
-  async function saveAsPage() {
-    if (!note || pageBusy) return;
+  // ---- downloads: web page (SPEC §23) and archive (SPEC §24) ----
+  let downloadBusy = $state(false);
+  // Runs a download of the note it was started for: saves first, refuses while there
+  // are unsaved changes or an upload (checked again just before downloading: typing
+  // or an upload may start while waiting), then hands over to run().
+  async function download(what: 'page' | 'archive', run: (id: string, ready: () => boolean) => Promise<void>) {
+    if (!note || downloadBusy) return;
     menuOpen = false;
     const id = note.id; // the note the action was for, even if another opens meanwhile
     const ro = readonly;
-    pageBusy = true;
-    // checked again just before downloading: typing or an upload may start while waiting
+    downloadBusy = true;
     const ready = (): boolean => {
       const s = existingSaver(id);
       if (!ro && s && (s.dirty || s.conflict || s.status === 'error')) {
-        app.toast('Save your changes first: the page is made from the saved note.', 'error');
+        app.toast(`Save your changes first: the ${what} is made from the saved note.`, 'error');
         return false;
       }
       if (uploads.tasks.some((t) => t.noteId === id && (t.status === 'uploading' || t.status === 'retrying'))) {
-        app.toast('Wait for the upload to finish: the page includes every file.', 'info');
+        app.toast(`Wait for the upload to finish: the ${what} includes every file.`, 'info');
         return false;
       }
       return true;
@@ -501,16 +503,32 @@
     try {
       if (!ro) await saveNow();
       if (!ready()) return;
+      await run(id, ready);
+    } catch (e) {
+      app.error(e);
+    } finally {
+      downloadBusy = false;
+    }
+  }
+
+  const saveAsPage = () =>
+    download('page', async (id, ready) => {
       const { bytes: size } = await api.pageSize(id, app.theme);
       if (size > 100 * 1024 * 1024 && !confirm(`This page will be about ${bytes(size)} because it includes every file. Very large pages can be slow to open, and some tunnels or proxies refuse downloads this big.\n\nDownload it?`)) return;
       if (!ready()) return;
       await downloadPage(id, app.theme);
-    } catch (e) {
-      app.error(e);
-    } finally {
-      pageBusy = false;
-    }
-  }
+    });
+
+  // trashed notes can't be downloaded as an archive (the server refuses them too)
+  const downloadArchive = () =>
+    readonly
+      ? undefined
+      : download('archive', async (id, ready) => {
+          const { missing } = await api.archiveCheck(id);
+          if (!ready()) return;
+          startDownload(archiveURL(id));
+          if (missing > 0) app.toast(`${missing === 1 ? '1 file is' : `${missing} files are`} missing on the server: see MISSING.txt in the archive.`, 'info');
+        });
 
   async function duplicate() {
     if (!note) return;
@@ -584,6 +602,7 @@
     };
     const onSave = () => void saveNow();
     const onSavePage = () => void saveAsPage();
+    const onDownloadArchive = () => void downloadArchive();
     const onFormat = (e: Event) => {
       if (readonly || app.raw) return;
       if (!format((e as CustomEvent).detail as StyleOp)) app.toast('Select some text first.', 'info');
@@ -608,6 +627,7 @@
     window.addEventListener('notes:section-options', onSectionKeys);
     window.addEventListener('notes:save', onSave);
     window.addEventListener('notes:save-page', onSavePage);
+    window.addEventListener('notes:download-archive', onDownloadArchive);
     window.addEventListener('notes:format', onFormat);
     document.addEventListener('visibilitychange', onHide);
     window.addEventListener('beforeunload', onUnload);
@@ -624,6 +644,7 @@
       app.noteSections = [];
       window.removeEventListener('notes:save', onSave);
       window.removeEventListener('notes:save-page', onSavePage);
+      window.removeEventListener('notes:download-archive', onDownloadArchive);
       window.removeEventListener('notes:format', onFormat);
       document.removeEventListener('visibilitychange', onHide);
       window.removeEventListener('beforeunload', onUnload);
@@ -739,7 +760,7 @@
           <Icon name="files" />{#if note.attachments.length}<span class="count-badge" aria-hidden="true">{note.attachments.length}</span>{/if}
         </button>
         {#if readonly}
-          <button class="icon-btn" title="Save as web page" aria-label="Save as web page" disabled={pageBusy} onclick={saveAsPage}><Icon name="page" /></button>
+          <button class="icon-btn" title="Save as web page" aria-label="Save as web page" disabled={downloadBusy} onclick={saveAsPage}><Icon name="page" /></button>
           <button class="btn small" onclick={restore}><Icon name="restore" size={15} /> Restore</button>
           <button class="btn small danger" onclick={purge}><Icon name="trash" size={15} /> Delete forever</button>
         {:else}
@@ -749,7 +770,8 @@
               <button class="menu-scrim" tabindex="-1" aria-hidden="true" onclick={() => (menuOpen = false)}></button>
               <div class="menu menu-right" role="menu" use:menu={{ onclose: () => (menuOpen = false) }}>
                 <button role="menuitem" data-first onclick={duplicate}><Icon name="copy" size={16} /> Duplicate</button>
-                <button role="menuitem" disabled={pageBusy} onclick={saveAsPage}><Icon name="page" size={16} /> Save as web page</button>
+                <button role="menuitem" disabled={downloadBusy} onclick={saveAsPage}><Icon name="page" size={16} /> Save as web page</button>
+                <button role="menuitem" disabled={downloadBusy} onclick={downloadArchive}><Icon name="archive" size={16} /> Download as .tar.gz</button>
                 {#if !app.raw}
                   <button role="menuitem" disabled={!hasTitle} onclick={() => ((menuOpen = false), openSecPop('add', -1, moreBtn))}><Icon name="section" size={16} /> Add section</button>
                   {#if sectionList.length}

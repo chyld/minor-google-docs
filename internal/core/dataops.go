@@ -149,6 +149,13 @@ type manifestNote struct {
 	CreatedAt   string            `json:"created_at"`
 	UpdatedAt   string            `json:"updated_at"`
 	Attachments []manifestAttach  `json:"attachments"`
+	Missing     []manifestMissing `json:"missing,omitempty"` // a one-note archive's files it couldn't include (import ignores it)
+}
+
+type manifestMissing struct {
+	Ref      string `json:"ref"`
+	Filename string `json:"filename"`
+	Reason   string `json:"reason"`
 }
 
 type manifestAttach struct {
@@ -248,20 +255,7 @@ func (s *Store) Export(ctx context.Context, uid string, w io.Writer) error {
 			} else if err != nil {
 				return err
 			}
-			fname := notReserved(SanitizeFilename(strings.Map(func(r rune) rune {
-				if strings.ContainsRune(`\:*?"<>|`, r) {
-					return '_'
-				}
-				return r
-			}, a.Filename)))
-			ext := filepath.Ext(fname)
-			base := strings.TrimSuffix(fname, ext)
-			cand := fname
-			for i := 2; usedFiles[strings.ToLower(cand)]; i++ {
-				cand = fmt.Sprintf("%s (%d)%s", base, i, ext)
-			}
-			usedFiles[strings.ToLower(cand)] = true
-			ap := folder + "/files/" + cand
+			ap := folder + "/files/" + uniqueFileName(usedFiles, exportFileName(a.Filename))
 			fw, err := zw.CreateHeader(&zip.FileHeader{Name: ap, Method: zip.Store, Modified: time.UnixMilli(a.CreatedAt)})
 			if err != nil {
 				f.Close()
@@ -286,6 +280,19 @@ func (s *Store) Export(ctx context.Context, uid string, w io.Writer) error {
 		return err
 	}
 	return zw.Close()
+}
+
+// uniqueFileName picks name, or "name (2).ext", … not used yet in a folder
+// (compared case-insensitively: the export may be unpacked on macOS/Windows).
+func uniqueFileName(used map[string]bool, name string) string {
+	ext := filepath.Ext(name)
+	base := strings.TrimSuffix(name, ext)
+	cand := name
+	for i := 2; used[strings.ToLower(cand)]; i++ {
+		cand = fmt.Sprintf("%s (%d)%s", base, i, ext)
+	}
+	used[strings.ToLower(cand)] = true
+	return cand
 }
 
 func safeName(s string) string {
@@ -318,12 +325,26 @@ func notReserved(name string) string {
 	return name
 }
 
-// Import creates notes for a user from either an export (a .zip or an unzipped
-// folder containing manifest.json — tags, pins, dates and attachments are
+// Import creates notes for a user from either an export (a .zip, a note's .tar.gz, or
+// an unpacked folder containing manifest.json — tags, pins, dates and attachments are
 // restored) or any folder of .txt files (searched recursively).
 func (s *Store) Import(ctx context.Context, uid, path string) (int, error) {
 	var fsys fs.FS
-	if strings.EqualFold(filepath.Ext(path), ".zip") {
+	if isTarGz(path) {
+		dir, err := s.unpackTarGz(path)
+		if dir != "" {
+			defer os.RemoveAll(dir)
+		}
+		if err != nil {
+			return 0, err
+		}
+		root, err := os.OpenRoot(dir)
+		if err != nil {
+			return 0, err
+		}
+		defer root.Close()
+		fsys = root.FS()
+	} else if strings.EqualFold(filepath.Ext(path), ".zip") {
 		zr, err := zip.OpenReader(path)
 		if err != nil {
 			return 0, err
@@ -336,7 +357,7 @@ func (s *Store) Import(ctx context.Context, uid, path string) (int, error) {
 			return 0, err
 		}
 		if !st.IsDir() {
-			return 0, fmt.Errorf("%s is not a folder or .zip", path)
+			return 0, fmt.Errorf("%s is not a folder, .zip or .tar.gz", path)
 		}
 		// os.Root refuses symlinks (and ..) that lead outside the folder
 		root, err := os.OpenRoot(path)
@@ -542,6 +563,79 @@ func (s *Store) importAttachment(ctx context.Context, uid, noteID string, r io.R
 }
 
 const maxManifestBytes = 64 << 20
+
+func isTarGz(path string) bool {
+	p := strings.ToLower(path)
+	return strings.HasSuffix(p, ".tar.gz") || strings.HasSuffix(p, ".tgz")
+}
+
+// unpackTarGz unpacks a .tar.gz into a new folder under data/tmp (removed by the
+// caller): only folders and regular files, each name a plain relative path, written
+// through os.Root so nothing can land outside it. Links and devices are skipped.
+func (s *Store) unpackTarGz(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", filepath.Base(path), err)
+	}
+	defer gz.Close()
+	tmp := filepath.Join(s.Dir, "tmp")
+	if err := os.MkdirAll(tmp, fsx.DirMode); err != nil {
+		return "", err
+	}
+	dir, err := os.MkdirTemp(tmp, "import-")
+	if err != nil {
+		return "", err
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return dir, err
+	}
+	defer root.Close()
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return dir, nil
+		} else if err != nil {
+			return dir, fmt.Errorf("%s: %w", filepath.Base(path), err)
+		}
+		name := strings.TrimSuffix(strings.TrimPrefix(hdr.Name, "./"), "/")
+		if name == "" || name == "." {
+			continue
+		}
+		if !filepath.IsLocal(name) || strings.ContainsRune(name, 0) {
+			return dir, fmt.Errorf("%s: unsafe name %q", filepath.Base(path), hdr.Name)
+		}
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := root.MkdirAll(name, fsx.DirMode); err != nil {
+				return dir, err
+			}
+		case tar.TypeReg:
+			if d := filepath.Dir(name); d != "." {
+				if err := root.MkdirAll(d, fsx.DirMode); err != nil {
+					return dir, err
+				}
+			}
+			out, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, fsx.FileMode)
+			if err != nil {
+				return dir, fmt.Errorf("%s: %w", name, err)
+			}
+			_, err = io.Copy(out, tr)
+			if cerr := out.Close(); err == nil {
+				err = cerr
+			}
+			if err != nil {
+				return dir, fmt.Errorf("%s: %w", name, err)
+			}
+		}
+	}
+}
 
 // openRegular opens name only if it is a regular file (no devices, fifos or dirs).
 func openRegular(fsys fs.FS, name string) (fs.File, error) {

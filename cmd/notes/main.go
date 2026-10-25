@@ -36,7 +36,8 @@ Usage:
   notes user rm <name> [--purge-data]
   notes backup [dest-dir]                   snapshot DB + files to a .tar.gz
   notes export <user> [file.zip]            export one user's notes (default: data/backups/)
-  notes import <user> <export.zip|folder>   restore an export, or create notes from *.txt files
+  notes import <user> <file|folder>         restore an export (.zip), a note's .tar.gz,
+                                            or create notes from *.txt files
   notes reindex                             rebuild the search index
   notes doctor [--fix]                      check files vs database
   notes gc                                  run maintenance once
@@ -129,7 +130,7 @@ func run(cmd string, args []string) error {
 		fmt.Println("exported to", abs)
 	case "import":
 		if len(args) != 2 {
-			return errors.New("usage: notes import <user> <export.zip | folder>")
+			return errors.New("usage: notes import <user> <export.zip | note.tar.gz | folder>")
 		}
 		u, _, err := store.UserByName(ctx, args[0])
 		if err != nil {
